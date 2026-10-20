@@ -91,7 +91,7 @@ fn install(target: &Path, contents: &[u8], force: bool) -> Result<bool, String> 
 
 /// The path to register in opencode.jsonc: the one the user invoked (e.g. /opt/homebrew/bin/...),
 /// not the resolved target, so it survives `brew upgrade` (which replaces the versioned Cellar dir).
-fn stable_exe() -> PathBuf {
+pub(crate) fn stable_exe() -> PathBuf {
     let invoked = std::env::args_os().next().map(PathBuf::from);
     let abs = invoked.and_then(|p| {
         if p.components().count() > 1 {
@@ -157,6 +157,67 @@ fn tool_next_steps() -> Vec<String> {
     steps
 }
 
+/// If the a2a entry's `command[0]` is a path to a file that no longer exists, point `command` at
+/// `[exe, "hub"]` (other keys kept). Returns the old path when it repaired something.
+fn repair_command(entry: &mut serde_json::Value, exe: &Path) -> Option<String> {
+    let old = entry.get("command")?.get(0)?.as_str()?.to_string();
+    if !old.contains('/') || Path::new(&old).is_file() {
+        return None;
+    }
+    entry["command"] = serde_json::json!([exe.display().to_string(), "hub"]);
+    Some(old)
+}
+
+/// Self-heal after a reinstall moved the binary: repair a stale a2a MCP command in
+/// `opencode.jsonc` and a stale `a2a/codetypera2a.path`. Returns a message only when something
+/// changed or a manual hint is needed; IO errors are swallowed (`None`).
+pub fn heal(root: &Path, exe: &Path) -> Option<String> {
+    let mut msgs = Vec::new();
+    let cfg_path = root.join("opencode.jsonc");
+    if let Ok(text) = std::fs::read_to_string(&cfg_path) {
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(mut cfg) => {
+                let old = cfg.pointer_mut("/mcp/servers/a2a").and_then(|s| repair_command(s, exe));
+                if let Some(old) = old {
+                    let bak = root.join("opencode.jsonc.bak-a2a");
+                    let out = serde_json::to_string_pretty(&cfg).ok()?;
+                    if std::fs::copy(&cfg_path, &bak).is_ok() && std::fs::write(&cfg_path, out + "\n").is_ok() {
+                        msgs.push(format!("mcp server a2a path repaired ({old} -> {})", exe.display()));
+                    }
+                }
+            }
+            Err(_) => {
+                if has_stale_binary_path(&text) {
+                    msgs.push(format!(
+                        "{} has a stale a2a binary path; set mcp.servers.a2a.command to [\"{}\", \"hub\"]",
+                        cfg_path.display(),
+                        exe.display()
+                    ));
+                }
+            }
+        }
+    }
+    let path_file = root.join("a2a").join("codetypera2a.path");
+    if let Ok(recorded) = std::fs::read_to_string(&path_file) {
+        let recorded = recorded.trim();
+        if !recorded.is_empty() && !Path::new(recorded).exists() && std::fs::write(&path_file, exe.display().to_string()).is_ok() {
+            msgs.push(format!("codetypera2a.path repaired ({recorded} -> {})", exe.display()));
+        }
+    }
+    if msgs.is_empty() { None } else { Some(msgs.join("; ")) }
+}
+
+/// Crude scan of commented JSONC: any quoted absolute path ending in `codetypera2a` that is gone.
+fn has_stale_binary_path(text: &str) -> bool {
+    text.match_indices("codetypera2a\"").any(|(i, _)| {
+        let head = &text[..i + "codetypera2a".len()];
+        head.rfind('"').is_some_and(|q| {
+            let p = &head[q + 1..];
+            p.starts_with('/') && !Path::new(p).is_file()
+        })
+    })
+}
+
 /// Register the hub as an MCP server in `opencode.jsonc` (opencode v2: `mcp.servers.<name>`,
 /// `codemode: false` so agents call `a2a_*` tools directly). Returns a status line.
 fn register_mcp(root: &Path, exe: &Path, force: bool) -> Result<String, String> {
@@ -201,7 +262,10 @@ fn register_mcp(root: &Path, exe: &Path, force: bool) -> Result<String, String> 
         .ok_or("`mcp.servers` in opencode.jsonc is not an object")?;
     let mut notes = Vec::new();
     if servers.contains_key("a2a") && !force {
-        notes.push("mcp server a2a already registered (use --force to replace)".to_string());
+        match servers.get_mut("a2a").and_then(|s| repair_command(s, exe)) {
+            Some(old) => notes.push(format!("mcp server a2a path repaired ({old} -> {})", exe.display())),
+            None => notes.push("mcp server a2a already registered (use --force to replace)".to_string()),
+        }
     } else {
         servers.insert("a2a".into(), entry);
         notes.push(format!("mcp server a2a registered in {}", path.display()));
@@ -376,6 +440,90 @@ pub fn init(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("a2a-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a2a")).unwrap();
+        dir
+    }
+
+    fn cmd0(dir: &Path) -> String {
+        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
+        cfg["mcp"]["servers"]["a2a"]["command"][0].as_str().unwrap().to_string()
+    }
+
+    fn a2a_cfg(cmd: &str) -> String {
+        format!(r#"{{"mcp":{{"servers":{{"a2a":{{"type":"local","command":["{cmd}","hub"],"codemode":false,"x":1}}}}}}}}"#)
+    }
+
+    #[test]
+    fn heal_repairs_stale_path_and_keeps_keys() {
+        let dir = tmp("heal-stale");
+        let new = std::env::current_exe().unwrap();
+        std::fs::write(dir.join("opencode.jsonc"), a2a_cfg("/gone/codetypera2a")).unwrap();
+        let msg = heal(&dir, &new).unwrap();
+        assert!(msg.contains(&format!("path repaired (/gone/codetypera2a -> {})", new.display())), "{msg}");
+        assert_eq!(cmd0(&dir), new.display().to_string());
+        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
+        assert_eq!(cfg["mcp"]["servers"]["a2a"]["x"], 1);
+        assert_eq!(cfg["mcp"]["servers"]["a2a"]["codemode"], false);
+        assert!(dir.join("opencode.jsonc.bak-a2a").exists());
+        assert!(heal(&dir, &new).is_none(), "second run must be a no-op");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heal_leaves_valid_and_bare_commands() {
+        let dir = tmp("heal-valid");
+        let real = std::env::current_exe().unwrap();
+        for cmd in [real.display().to_string(), "codetypera2a".to_string()] {
+            std::fs::write(dir.join("opencode.jsonc"), a2a_cfg(&cmd)).unwrap();
+            assert!(heal(&dir, Path::new("/new/codetypera2a")).is_none());
+            assert_eq!(cmd0(&dir), cmd);
+        }
+        assert!(!dir.join("opencode.jsonc.bak-a2a").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heal_hints_on_commented_jsonc_without_rewriting() {
+        let dir = tmp("heal-jsonc");
+        let text = "{\n // mine\n \"mcp\": {\"servers\": {\"a2a\": {\"command\": [\"/gone/codetypera2a\", \"hub\"]}}}\n}";
+        std::fs::write(dir.join("opencode.jsonc"), text).unwrap();
+        let msg = heal(&dir, Path::new("/new/codetypera2a")).unwrap();
+        assert!(msg.contains("/new/codetypera2a") && !msg.contains('\n'), "{msg}");
+        assert_eq!(std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap(), text);
+        assert!(!dir.join("opencode.jsonc.bak-a2a").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn heal_rewrites_path_file_only_when_stale() {
+        let dir = tmp("heal-path");
+        let pf = dir.join("a2a").join("codetypera2a.path");
+        let real = std::env::current_exe().unwrap();
+        std::fs::write(&pf, real.display().to_string()).unwrap();
+        assert!(heal(&dir, Path::new("/new/codetypera2a")).is_none());
+        assert_eq!(std::fs::read_to_string(&pf).unwrap(), real.display().to_string());
+        std::fs::write(&pf, "/gone/codetypera2a").unwrap();
+        assert!(heal(&dir, Path::new("/new/codetypera2a")).unwrap().contains("codetypera2a.path repaired"));
+        assert_eq!(std::fs::read_to_string(&pf).unwrap(), "/new/codetypera2a");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn register_mcp_repairs_stale_without_force() {
+        let dir = tmp("reg-stale");
+        let new = std::env::current_exe().unwrap();
+        std::fs::write(dir.join("opencode.jsonc"), a2a_cfg("/gone/codetypera2a")).unwrap();
+        let note = register_mcp(&dir, &new, false).unwrap();
+        assert!(note.contains(&format!("path repaired (/gone/codetypera2a -> {})", new.display())), "{note}");
+        assert_eq!(cmd0(&dir), new.display().to_string());
+        let note = register_mcp(&dir, Path::new("/other/codetypera2a"), false).unwrap();
+        assert!(note.contains("already registered"), "{note}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn existing_mcp_servers_are_kept() {
