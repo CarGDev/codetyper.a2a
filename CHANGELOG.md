@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [1.1.1] - 2026-10-19
 
+### Added
+
+- **GitHub Actions.** `ci.yml` runs `cargo test` and `codetypera2a eval` on Linux and macOS for every
+  push to `master` and every pull request. `release.yml` runs when a `v*` tag is pushed: it checks the
+  tag against the `Cargo.toml` version, creates the GitHub release, computes the tarball sha256 and
+  updates `url` and `sha256` in the Homebrew tap. It needs the repository secret `TAP_GITHUB_TOKEN`.
+
 ### Fixed
 
 - **A stale binary path no longer breaks the `a2a` MCP server.** After moving from `cargo install` to

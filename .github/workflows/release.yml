@@ -1,0 +1,68 @@
+name: Release
+
+# Push a tag like v1.1.1 (it must match the version in Cargo.toml). This creates a GitHub release
+# and updates the Homebrew tap (url + sha256). It needs the repository secret TAP_GITHUB_TOKEN:
+# a fine-grained token with "Contents: read and write" on CarGDev/homebrew-codetypera2a.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  TAP_REPO: CarGDev/homebrew-codetypera2a
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match Cargo.toml
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "v${crate}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate}" >&2
+            exit 1
+          fi
+
+      - name: Tarball checksum
+        id: src
+        run: |
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          curl -fsSL --retry 5 --retry-delay 3 "$url" -o src.tar.gz
+          sha=$(sha256sum src.tar.gz | cut -d' ' -f1)
+          # sha256 of an empty file means the download was empty
+          if [ "$sha" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+            echo "empty tarball" >&2
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag --title "${GITHUB_REF_NAME}"
+
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ secrets.TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Update the formula
+        working-directory: tap
+        run: |
+          f=Formula/codetypera2a.rb
+          sed -i -E 's|^(  url ")[^"]*(")|\1${{ steps.src.outputs.url }}\2|' "$f"
+          sed -i -E 's|^(  sha256 ")[^"]*(")|\1${{ steps.src.outputs.sha }}\2|' "$f"
+          grep -nE '^  (url|sha256) ' "$f"
+          git diff --quiet && { echo "formula already up to date"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "codetypera2a ${GITHUB_REF_NAME#v}"
+          git push
