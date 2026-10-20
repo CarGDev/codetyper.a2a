@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-19
+
+### Fixed
+
+- **A stale binary path no longer breaks the `a2a` MCP server.** After moving from `cargo install` to
+  Homebrew (or any reinstall that moves the binary), `opencode.jsonc` and `a2a/codetypera2a.path`
+  kept pointing at the old path and opencode failed with `NotFound: ChildProcess.spawn`. The tool now
+  repairs itself:
+  - `codetypera2a init` replaces only the `command` of an existing `a2a` entry when its path no
+    longer exists (other keys are kept, no `--force` needed, so your edited agents are not touched).
+  - `oc` (including the `opencode` alias) does the same check before starting, backs up
+    `opencode.jsonc` to `opencode.jsonc.bak-a2a`, rewrites `codetypera2a.path` when it is dead, and
+    prints one `oc: ...` line when it changed something. `oc help` and `oc --version` stay
+    side-effect free.
+  - A config with comments is not rewritten: the corrected command is printed instead.
+  - A path that still exists, or a plain command name on `PATH`, is left alone.
+
 ## [1.1.0] - 2026-10-19
 
 ### Added

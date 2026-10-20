@@ -121,6 +121,11 @@ fn run_opencode(args: &[String]) -> i32 {
 
 pub fn run(args: &[String]) -> i32 {
     let (cmd, arg) = (args.first().map(String::as_str), args.get(1).map(String::as_str));
+    if !matches!(cmd, Some("help" | "--help" | "-h" | "version" | "--version" | "-V")) {
+        if let Some(msg) = crate::cli::heal(&paths::config_dir(), &crate::cli::stable_exe()) {
+            eprintln!("oc: {msg}");
+        }
+    }
     match cmd {
         // oc's own help, with no side effects (nothing is started or opened)
         Some("help" | "--help" | "-h") => print!("{OC_HELP}"),
