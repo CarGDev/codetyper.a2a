@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-20
+
+### Added
+
+- `oc open-project <dir> [--prompt <text>]`: opens a project in its own tmux tab running `oc` and can hand a task to that project's orchestrator.
+- `oc status` prints each open task's `ctx=` and flags `HOP-CAPPED` contexts.
+
+### Changed
+
+- Orchestrator: no task, no `build`; no design, no tasks; no plan, no design.
+- Orchestrator: route per request type (feature, debug only, debugger first, tests first), always ending with testing; plan/design/tasks persisted to Engram and `~/.config/opencode/plans/<project>/<slug>/`; `oc status` gate before every dispatch (answers waiting tasks, `oc continue` on hop caps); `db.dbml` step for the project's own SQL; opens other projects' tabs only when asked.
+
 ## [1.1.2] - 2026-10-20
 
 ### Changed

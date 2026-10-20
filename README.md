@@ -9,7 +9,7 @@ its own session, shown as a tab in the opencode you already have open: an orches
 routes and delegates; a dispatcher wakes the right agent's tab and reports back to the
 orchestrator's. One binary, no Node.
 
-Current version: **1.1.2** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.2.0** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## How a task travels
 
@@ -33,7 +33,7 @@ Research's [harness2](https://github.com/google-research/harness2) and the
 | Parallel probes (harness2) | For uncertain work the orchestrator sends 2-3 read-only probes to different agents and compares their artifacts before choosing |
 | Evidence-backed lessons (harness2) | Lessons are saved to Engram (`a2a/lessons/<project>`) only with evidence, and `brain` reads them when routing |
 | Memory and state | SQLite hub (`hub.db`) for tasks and nudges; Engram for long-term lessons |
-| Orchestration: plan, decompose, hand off | `orchestrator` -> `brain` -> `plan` -> `architect` -> implementers, with work units of at most ~400 changed lines and approval gates |
+| Orchestration: plan, decompose, hand off | `orchestrator` -> `brain` -> `plan` -> `architect` -> implementers -> tests, route chosen per request (debug only, debugger first, tests first), plans saved to Engram and `~/.config/opencode/plans/`; `oc open-project <dir>` opens another project in a tmux tab |
 | Observability | `oc status`, `oc watch`, the live `a2a-status` tmux window and the dispatcher log; `oc trace <task>` for a per-task timeline and `oc stats` per agent |
 | Evals | `codetypera2a eval` replays fixed scenarios (routing, hop cap, no duplicate nudges, seeded-bug reviewer) offline with a fake opencode; `cargo test` and CI can gate on its exit code |
 | Human in the loop | Plan approval gates; the dispatcher reports back to the session the task came from |
@@ -55,7 +55,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 1.1.2
+codetypera2a --version        # codetypera2a 1.2.0
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of

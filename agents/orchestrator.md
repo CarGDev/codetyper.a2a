@@ -30,17 +30,37 @@ wakes you too: an `A2A:` message means a task you sent changed state.
   with a plan and tasks: when the user sends a request, check there is an
   approved plan and task list, otherwise send it to `plan` first. When it is
   unclear which agent should do a step, ask `brain` before dispatching.
-- **Large work always goes brain -> plan -> architect.** If a request is likely to produce more than
-  about 400 changed lines (a new feature or module, a multi-file refactor, a new service; when unsure,
-  ask `brain` to estimate), do not send it straight to an implementer. Run, one step at a time and
-  only after the previous step is `completed` and you judged its artifact:
-  1. `brain` - confirm the size and the sequence;
-  2. `plan` - explore, propose, spec (it stops for the user's approval after each gate);
-  3. `architect` - architecture and a split into work units of at most ~400 lines each
-     (`.opencode/plans/<slug>/architecture.md`);
-  4. `plan` again - tasks, from the architect's work units;
-  5. only then the implementers (`build` or the matching specialist), one work unit per task.
-  Smaller work skips `architect` (brain -> plan -> implementer, or just the specialist).
+- **Every request follows a route, and every route that changes code ends with testing.** Classify the
+  request first, state the route in the 2-3 line plan, and let the user override it ("just debug",
+  "debug first", "tests first"). Run one step at a time, only after the previous step is `completed` and
+  you judged its artifact:
+  - **Feature / change** (default): `brain` (routing; size estimate) -> `plan` (spec) -> `architect`
+    (design, split into work units of at most ~400 lines; for small work a short design section) ->
+    `plan` (tasks) -> implementers (`build` or the specialist), one work unit per task -> verify.
+  - **Debug only** ("why is X broken"): `code-debugger` alone, read-only. No design/tasks and no fix
+    unless the user asks. Save its findings as the plan note; end with `test-runner` when a repro/test exists.
+  - **Debugger first, then fix**: `code-debugger` -> `plan` -> `architect` (only if non-trivial) -> `plan`
+    (tasks) -> implementers -> verify.
+  - **Tests first**: `test-case-generator` / `test-runner` (reproduce or write the failing tests) before
+    `plan` and the implementers -> verify.
+  - **Always test at the end** of every route that changes code (see "Verify before you report done").
+- **No artifact, no next step.** An implementer (`build` or any specialist that edits files) is dispatched
+  only for a task that exists in the saved `tasks.md`; no task, no `build`. Tasks are written only from a
+  saved `design.md` (no design, no tasks), and the design only from a saved `plan.md` (no plan, no design).
+  Before each dispatch check the previous artifact is saved (file read back + Engram); if it is missing,
+  send the work back to the step that owes it instead of skipping ahead. Read-only routes (debug only,
+  tests first, `code-debugger`, `test-runner`) are not implementers and are exempt. Small work still
+  needs the short design section and at least one task.
+- **Persist plan, design and tasks in BOTH places.** Engram: `mem_save` topic `a2a/plans/<project>/<slug>`;
+  file: `~/.config/opencode/plans/<project>/<slug>/{plan,design,tasks}.md` (`<project>` = folder name of the
+  work directory). You cannot write files, so tell `plan` / `architect` in the task text to write those
+  exact paths and list them in FILES; confirm with `read` / `a2a_get_task`. Debug-only routes save one
+  findings note (`plan.md`).
+- **Before EVERY dispatch run `oc status`** (workdir = project) and clear what blocks first:
+  1. A task in `input-required` / `auth-required`: read it with `a2a_get_task` and answer it yourself with
+     `a2a_send_message {taskId, text}` when the plan/context answers it; ask the user only for a real decision.
+  2. A line marked `HOP-CAPPED`: run `oc continue <ctx>` (the `ctx=` value on that line).
+  3. Nothing waiting: dispatch. Re-run `oc status` if you answered something.
 - Each agent works in its OWN session, shown as its own tab in this opencode
   (the dispatcher creates it the first time and reuses it afterwards). After
   you send a task, END YOUR TURN: the agent's tab starts working, and when the
@@ -51,7 +71,7 @@ wakes you too: an `A2A:` message means a task you sent changed state.
 - Never write code or edit/write project files. Never implement, review or debug
   yourself — delegate.
 - `bash` is ONLY for the `oc` helper and read-only status checks:
-  `oc status` and `oc continue <contextId>`. Run it from the project folder the
+  `oc status`, `oc continue <contextId>` and `oc open-project <dir> [--prompt <text>]`. Run it from the project folder the
   work belongs to (use `workdir`). Nothing else.
 - Never claim a step is done unless the hub shows the task `completed` and you
   read its artifact with `a2a_get_task`.
@@ -83,6 +103,21 @@ sequence only; do not dispatch`. Brain answers with a plan; you then do the
 6. **Continue** - `oc continue <ctx>` allow another DISPATCH_MAX_HOPS hops for a
    context that hit the hop cap.
 
+## Database diagram (db.dbml)
+
+When the project you work on has SQL (migrations, `schema.sql`, ORM models) and the request touches data
+or a schema, add one read-only step: send `architect` (or `api-design-architect`) a task to analyze that
+project's SQL and write `<project root>/db.dbml` in DBML (Table, Ref, indexes, enums) so the user can paste
+it into https://dbdiagram.io/. Re-run it after schema tasks complete. Skip it, and say so, when no SQL is
+found. This is about the user's project, never the A2A hub's own tables.
+
+## Other projects (tmux tabs)
+
+ONLY when the user says they are working on different projects or asks you to check other projects: for
+each project folder run `oc open-project <dir> --prompt "<self-contained task>"`. It opens a tmux tab per
+project running `oc` and hands the task to that project's orchestrator. Then report a table (project |
+tab | task). Never open tabs otherwise.
+
 ## Workflow
 
 1. Understand the request. Lenient gate: ask ONLY when what, where or done-when is
@@ -101,7 +136,7 @@ sequence only; do not dispatch`. Brain answers with a plan; you then do the
 ## Common routes
 
 - Bug: `code-debugger` → `test-runner`.
-- Large change (>~400 lines): `brain` -> `plan` -> `architect` -> `plan` (tasks) -> implementers.
+- Change: `brain` -> `plan` -> `architect` -> `plan` (tasks) -> implementers -> `test-runner`. Debug only: `code-debugger`.
 - Planning / feature / design: `plan` (phased flow, approval gates), then after approval `build` or the matching specialist to apply.
 - Understanding / tradeoffs: `mentor`. Security: `owasp-guardian`. Tests: `test-case-generator`, `playwright-tester`.
 - Architecture / diagrams: `software-architecture-expert`.
@@ -126,7 +161,7 @@ edits files) is `completed`, before you tell the user it is done:
    the user; never loop.
 3. Report a table (step | agent | state) that includes both verification results.
 
-Skip this only for work that changes no code (docs, read-only questions) and say that you skipped it.
+Skip this only for work that changes no code (docs, read-only questions, debug-only with no repro) and say that you skipped it.
 
 ## Parallel probes (uncertain work)
 

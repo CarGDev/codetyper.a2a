@@ -8,6 +8,9 @@
 //!   oc status           dispatcher state, running sessions and open tasks
 //!   oc stop             stop the dispatcher
 //!   oc trace <task>     per-task event timeline;  oc stats  per-agent summary
+//!   oc open-project <dir> [--prompt <text>]
+//!                       open <dir> in its own tmux tab running `oc`; with --prompt, hand the text to
+//!                       that tab's orchestrator
 //!   oc continue <ctx>   allow another DISPATCH_MAX_HOPS hops for a context that hit the hop cap
 //!
 //! ONE dispatcher serves all projects (it reads the folder from each task). It is single-instance
@@ -35,6 +38,9 @@ COMMANDS:
   oc dispatch           run the dispatcher in this pane (foreground)
   oc stop               stop the dispatcher
   oc agent <name>       switch this folder's newest session to another agent
+  oc open-project <dir> [--prompt <text>]
+                        open <dir> in its own tmux tab (running `oc`); with --prompt, send the text
+                        to that project's orchestrator
   oc continue <ctx>     allow more hops for a context that hit the hop cap
   oc trace <task-id>    timeline of one task (id or 8-char prefix): events, offsets, duration
   oc stats              per-agent summary: tasks, nudges, average duration, tokens/cost
@@ -108,6 +114,50 @@ fn watch() -> i32 {
     }
 }
 
+/// Same rule as the dispatcher: agent-to-agent nudges against DISPATCH_MAX_HOPS * (1 + grants).
+fn hop_capped(d: &rusqlite::Connection, ctx: &str, max_hops: i64) -> bool {
+    let n: i64 = d
+        .query_row("SELECT COUNT(*) FROM nudges WHERE context_id = ? AND kind IN ('assignee','requester')", [ctx], |r| r.get(0))
+        .unwrap_or(0);
+    let grants: i64 = d.query_row("SELECT grants FROM hop_allow WHERE context_id = ?", [ctx], |r| r.get(0)).unwrap_or(0);
+    n >= max_hops * (1 + grants)
+}
+
+/// `oc open-project <dir> [--prompt <text>]`: one tmux tab per project, running `oc` there.
+fn open_project(args: &[String]) -> i32 {
+    let mut dir = None;
+    let mut prompt = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--prompt" => prompt = it.next().cloned(),
+            _ if dir.is_none() => dir = Some(a.clone()),
+            _ => die("usage: oc open-project <dir> [--prompt <text>]"),
+        }
+    }
+    let Some(dir) = dir else { die("usage: oc open-project <dir> [--prompt <text>]") };
+    let dir = std::fs::canonicalize(&dir).unwrap_or_else(|_| die(&format!("no such folder: {dir}"))).display().to_string();
+    let cmd = format!("cd '{}' && oc", dir.replace('\'', "'\\''"));
+    match ok(sys::tmux_ensure_window(&sys::dir_base(&dir), &cmd)) {
+        sys::Tab::Created => println!("opened tmux window {} for {dir}", sys::dir_base(&dir)),
+        sys::Tab::AlreadyOpen => println!("tmux window {} already open for {dir}", sys::dir_base(&dir)),
+        sys::Tab::NotInTmux => die("not inside tmux: cannot open a tab"),
+    }
+    let Some(text) = prompt else { return 0 };
+    // the new opencode needs a moment to start and register its session
+    let wait = paths::env_u64("OC_OPEN_PROJECT_WAIT_SECS", 60);
+    for _ in 0..wait {
+        if let Some(s) = opencode::list(&dir).into_iter().next() {
+            ok(opencode::switch_agent(&s.id, "orchestrator"));
+            ok(opencode::prompt(&s.id, &text));
+            println!("prompt sent to the orchestrator of {dir} (session {})", s.id);
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    die(&format!("no opencode session appeared in {dir} within {wait}s; send the prompt from its tab"))
+}
+
 fn run_opencode(args: &[String]) -> i32 {
     ensure_dispatcher();
     Command::new(opencode::bin())
@@ -164,6 +214,7 @@ pub fn run(args: &[String]) -> i32 {
             let g: i64 = ok(d.query_row("SELECT grants FROM hop_allow WHERE context_id = ?", [ctx], |r| r.get(0)).map_err(|e| e.to_string()));
             println!("context {ctx}: allowance is now {} hops (+{max_hops})", max_hops * (1 + g));
         }
+        Some("open-project") => return open_project(&args[1..]),
         Some("trace") => {
             let Some(id) = arg else { die("usage: oc trace <task-id-or-prefix>") };
             let d = ok(db::open(&paths::db_path()));
@@ -187,10 +238,13 @@ pub fn run(args: &[String]) -> i32 {
                 "WHERE state IN ('submitted','working','input-required','auth-required') ORDER BY updated_at DESC LIMIT 20",
                 &[],
             ));
+            let max_hops = paths::env_u64("DISPATCH_MAX_HOPS", 40) as i64;
             for t in open {
+                let capped = hop_capped(&d, &t.context_id, max_hops);
                 println!(
-                    "{} {:<14} {} -> {} {}",
-                    &t.id[..8], t.state, t.from_agent, t.to_agent, t.directory.as_deref().unwrap_or("-")
+                    "{} {:<14} {} -> {} {} ctx={}{}",
+                    &t.id[..8], t.state, t.from_agent, t.to_agent, t.directory.as_deref().unwrap_or("-"), t.context_id,
+                    if capped { format!(" HOP-CAPPED (run: oc continue {})", t.context_id) } else { String::new() }
                 );
             }
         }
