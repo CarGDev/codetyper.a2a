@@ -9,7 +9,7 @@ its own session, shown as a tab in the opencode you already have open: an orches
 routes and delegates; a dispatcher wakes the right agent's tab and reports back to the
 orchestrator's. One binary, no Node.
 
-Current version: **1.1.0** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.1.1** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## How a task travels
 
@@ -55,14 +55,17 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 1.1.0
+codetypera2a --version        # codetypera2a 1.1.1
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
 the last release: `brew install --HEAD CarGDev/codetypera2a/codetypera2a`.
 
 If you previously ran `cargo install codetypera2a`, remove it first (`cargo uninstall codetypera2a`),
-otherwise `~/.cargo/bin` can shadow the Homebrew binary in your `PATH`.
+otherwise `~/.cargo/bin` can shadow the Homebrew binary in your `PATH`. If the binary moved (for
+example from cargo to Homebrew), you do not have to edit anything by hand: `codetypera2a init` or
+any `oc` run repairs a dead `a2a` path in `opencode.jsonc` and `a2a/codetypera2a.path` by itself
+(a backup is kept as `opencode.jsonc.bak-a2a`).
 
 ### Option B: download the repo
 
@@ -125,7 +128,7 @@ installed `~/.config/opencode/{a2a,plugins/a2a}` folders.
 | slash commands (`commands/`)               | `~/.config/opencode/commands/` (`/plan-new` ...)  |
 | tabs plugin (`plugins/a2a/tui.ts`)         | `~/.config/opencode/plugins/a2a/`                 |
 | `PROTOCOL.md`, `model-policy.json`         | `~/.config/opencode/a2a/`                         |
-| MCP servers `a2a`, `codegraph`, `context7`, `engram`, `playwright` + `default_agent` | `opencode.jsonc` (`mcp.servers`, backup kept; existing entries are never overwritten) |
+| MCP servers `a2a`, `codegraph`, `context7`, `engram`, `playwright` + `default_agent` | `opencode.jsonc` (`mcp.servers`, backup kept; existing entries are never overwritten, except that a dead `a2a` binary path is repaired) |
 | `oc` symlink                               | next to the binary                                |
 
 Use `--dir <path>` / `$OPENCODE_CONFIG_DIR` for another config dir, `--no-link` to skip the symlink.
