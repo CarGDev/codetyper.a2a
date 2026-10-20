@@ -50,18 +50,19 @@ Research's [harness2](https://github.com/google-research/harness2) and the
 
 ### Option A: Homebrew
 
-The formula in [`Formula/codetypera2a.rb`](Formula/codetypera2a.rb) builds from source. On the other
-machine (the repo must be pushed to the remote named in the formula):
+The formula lives in the tap [CarGDev/homebrew-codetypera2a](https://github.com/CarGDev/homebrew-codetypera2a).
+Homebrew installs the Rust toolchain it needs to build, so you do not need `cargo` or a clone:
 
 ```sh
-brew tap-new "$USER/a2a"
-curl -fsSL https://git.cargdev.io/CarGDev/codetyper.a2a/raw/branch/master/Formula/codetypera2a.rb \
-  -o "$(brew --repository)/Library/Taps/$USER/homebrew-a2a/Formula/codetypera2a.rb"
-brew install --HEAD "$USER/a2a/codetypera2a"
+brew install CarGDev/codetypera2a/codetypera2a
+codetypera2a --version        # codetypera2a 1.1.0
 ```
 
-Update later with `brew reinstall --HEAD "$USER/a2a/codetypera2a"`. If you publish the formula in a
-tap repo (`homebrew-<name>`), others just run `brew install <owner>/<name>/codetypera2a`.
+Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
+the last release: `brew install --HEAD CarGDev/codetypera2a/codetypera2a`.
+
+If you previously ran `cargo install codetypera2a`, remove it first (`cargo uninstall codetypera2a`),
+otherwise `~/.cargo/bin` can shadow the Homebrew binary in your `PATH`.
 
 ### Option B: download the repo
 
@@ -107,6 +108,7 @@ targets another config dir.
 
 ```sh
 brew uninstall codetypera2a            # or: cargo uninstall codetypera2a
+brew untap CarGDev/codetypera2a        # optional: remove the tap too
 rm -f ~/.cargo/bin/oc                  # the oc symlink, if init created it
 ```
 

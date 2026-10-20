@@ -23,6 +23,14 @@ All notable changes to this project are documented here. The format follows
   agent. Tokens and cost are stored as optional fields and shown as `n/a` because opencode usage is not
   read yet. Recording never breaks a dispatcher tick.
 - **`codetypera2a --version`** (also `-V` and `version`), and `oc --version`.
+- **Homebrew tap** [CarGDev/homebrew-codetypera2a](https://github.com/CarGDev/homebrew-codetypera2a):
+  `brew install CarGDev/codetypera2a/codetypera2a` builds the tagged `v1.1.0` release from source with
+  no `cargo` or clone needed. The formula test runs `--version`, `eval routing` and `oc help`.
+- Crate metadata (`description`, `license`, `repository`, `homepage`) in `Cargo.toml`.
+
+### Changed
+
+- README: the Homebrew install section now uses the tap instead of the git.cargdev.io steps.
 
 ## [1.0.0] - 2026-10-19
 
