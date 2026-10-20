@@ -9,7 +9,7 @@ its own session, shown as a tab in the opencode you already have open: an orches
 routes and delegates; a dispatcher wakes the right agent's tab and reports back to the
 orchestrator's. One binary, no Node.
 
-Current version: **1.1.1** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.1.2** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## How a task travels
 
@@ -55,7 +55,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 1.1.1
+codetypera2a --version        # codetypera2a 1.1.2
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of

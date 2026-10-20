@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-10-20
+
+### Changed
+
+- CI and release workflows use `actions/checkout@v5` (Node 24), which removes the Node.js 20
+  deprecation warning.
+- First release cut by `release.yml`: pushing the tag creates the GitHub release and updates the
+  Homebrew tap (`url` and `sha256`) automatically. No code changes since 1.1.1.
+
 ## [1.1.1] - 2026-10-19
 
 ### Added
