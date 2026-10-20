@@ -18,7 +18,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Tag must match Cargo.toml
         run: |
@@ -48,7 +48,7 @@ jobs:
         run: gh release create "${GITHUB_REF_NAME}" --generate-notes --verify-tag --title "${GITHUB_REF_NAME}"
 
       - name: Check out the tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.TAP_REPO }}
           token: ${{ secrets.TAP_GITHUB_TOKEN }}
