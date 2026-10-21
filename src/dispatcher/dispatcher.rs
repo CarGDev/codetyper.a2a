@@ -571,41 +571,37 @@ impl Dispatcher {
                 self.event(t, "nudge_released", target, "busy");
                 self.finish_nudge(&key, "pending", 0, Some("session busy")); // retry next tick
             }
-            Err(err) => {
-                let attempt: i64 =
-                    self.conn.query_row("SELECT attempts FROM nudges WHERE key = ?", [&key], |r| r.get(0)).unwrap_or(1);
-                let why = first_line(&err).to_string();
-                log(&format!(
-                    "prompt failed (task {}, session {session}, attempt {attempt}/{MAX_ATTEMPTS}): {why}",
-                    &t.id[..8]
-                ));
-                // 404 = the session may be unusable (folder gone): retire it once, so the next try
-                // gets a fresh one; if that 404s too the cause is not the session, so back off
-                let gone = why.contains("404") && attempt == 1;
-                if gone {
-                    let _ = self.conn.execute("UPDATE sessions SET status='stale' WHERE session_id = ?", [&session]);
-                }
-                if attempt >= MAX_ATTEMPTS {
-                    self.event(t, "nudge_dead", target, &why);
-                    self.finish_nudge(&key, "dead", 0, Some(&why));
-                    if kind == "assignee" {
-                        log(&format!("giving up on {target} for task {}", &t.id[..8]));
-                        self.post_system_message(
-                            t,
-                            "input-required",
-                            &format!("delivery_failed: could not hand the task to \"{target}\" after {MAX_ATTEMPTS} attempts ({why}). Fix that, then reply on this task to retry."),
-                        )?;
-                    } else {
-                        log(&format!("giving up waking {target} for task {}; the result stays in the hub", &t.id[..8]));
-                    }
-                } else {
-                    self.event(t, "nudge_released", target, "error");
-                    let wait = if gone { 0 } else { retry_delay_ms(attempt, self.cfg.retry_base_ms) };
-                    self.finish_nudge(&key, "pending", wait, Some(&why));
-                }
-            }
+            Err(err) => self.delivery_failed(t, kind, target, &session, &key, &err)?,
         }
         Ok(())
+    }
+
+    /// A prompt could not be delivered: retry later with growing waits, or give up after
+    /// MAX_ATTEMPTS. A 404 on the first attempt means the session is unusable (folder gone): it is
+    /// retired and the retry is immediate, so the next try gets a fresh one.
+    fn delivery_failed(&self, t: &TaskRow, kind: &str, target: &str, session: &str, key: &str, err: &str) -> R<()> {
+        let attempt: i64 = self.conn.query_row("SELECT attempts FROM nudges WHERE key = ?", [key], |r| r.get(0)).unwrap_or(1);
+        let why = first_line(err);
+        log(&format!("prompt failed (task {}, session {session}, attempt {attempt}/{MAX_ATTEMPTS}): {why}", &t.id[..8]));
+        let retire = why.contains("404") && attempt == 1;
+        let _ = retire.then(|| self.conn.execute("UPDATE sessions SET status='stale' WHERE session_id = ?", [session]));
+        if attempt < MAX_ATTEMPTS {
+            self.event(t, "nudge_released", target, "error");
+            let wait = (!retire).then(|| retry_delay_ms(attempt, self.cfg.retry_base_ms)).unwrap_or(0);
+            self.finish_nudge(key, "pending", wait, Some(why));
+            return Ok(());
+        }
+        self.give_up(t, kind, target, key, why)
+    }
+
+    /// Delivery is abandoned. Only an assignee nudge is reported on the task; a missed wake-up of
+    /// the requester leaves the result in the hub.
+    fn give_up(&self, t: &TaskRow, kind: &str, target: &str, key: &str, why: &str) -> R<()> {
+        self.event(t, "nudge_dead", target, why);
+        self.finish_nudge(key, "dead", 0, Some(why));
+        log(&format!("giving up on {target} for task {} ({kind})", &t.id[..8]));
+        let text = format!("delivery_failed: could not hand the task to \"{target}\" after {MAX_ATTEMPTS} attempts ({why}). Fix that, then reply on this task to retry.");
+        (kind == "assignee").then_some(text).map_or(Ok(()), |m| self.post_system_message(t, "input-required", &m))
     }
 
     /// Remember the assignee session's cumulative usage when it is handed the task, so what it
@@ -688,6 +684,24 @@ impl Dispatcher {
         self.stall_check()
     }
 
+    /// The error the assignee's last turn ended with, when that turn ended after `since` (the
+    /// hand-over). `None`: nothing to report, or no session to ask.
+    fn failed_turn(&self, t: &TaskRow, since: &str, active: &HashSet<String>) -> R<Option<String>> {
+        let Some(dir) = t.directory.as_deref().filter(|_| !self.cfg.dry) else { return Ok(None) };
+        let Some(session) = self.agent_session(&t.to_agent, dir)? else { return Ok(None) };
+        if active.contains(&session) {
+            return Ok(None);
+        }
+        Ok(opencode::failure_since(&session, parse_ms(since)))
+    }
+
+    fn fail_for_agent_error(&self, t: &TaskRow, err: &str) -> R<()> {
+        log(&format!("task {}: {}'s turn failed ({err}); failing the task", &t.id[..8], t.to_agent));
+        self.event(t, "agent_error", &t.to_agent, err);
+        let text = format!("agent_error: {}'s turn failed: {err}. Fix that (model, credentials), then send the task again.", t.to_agent);
+        self.post_system_message(t, "failed", &text)
+    }
+
     fn stall_check(&mut self) -> R<()> {
         let open = db::tasks(&self.conn, "WHERE state IN ('submitted','working') AND to_agent != 'any'", &[])?;
         let active = self.active_sessions();
@@ -701,6 +715,12 @@ impl Dispatcher {
                 )
                 .ok();
             let Some(last) = last else { continue };
+            // the agent's turn already failed (provider error, no licence, ...): fail the task now
+            // with that error instead of leaving it to stall for minutes
+            if let Some(err) = self.failed_turn(&t, &last, &active)? {
+                self.fail_for_agent_error(&t, &err)?;
+                continue;
+            }
             let age_s = (chrono::Utc::now().timestamp_millis() - parse_ms(&last)) as f64 / 1000.0;
             if age_s < self.cfg.stall_secs as f64 {
                 continue;
@@ -886,9 +906,16 @@ pub fn sweep_unregistered() {
     }
 }
 
+fn terminate_all(pids: impl Iterator<Item = u32>) {
+    pids.for_each(|p| {
+        terminate(p, 3000);
+    });
+}
+
 /// `oc stop`: end every dispatcher of this database (registered ones and the pidfile owner).
 /// Returns how many were signalled.
 pub fn stop_all() -> usize {
+    mark_stopped();
     let mut pids: Vec<u32> = registered().into_iter().map(|(p, _)| p).collect();
     if let Some(p) = sys::dispatcher_pid(&paths::dispatcher_pid_path()) {
         if !pids.contains(&p) {
@@ -902,29 +929,49 @@ pub fn stop_all() -> usize {
     pids.len()
 }
 
+/// Present after `oc stop` / `oc shutdown`: the hubs that opencode keeps running supervise the
+/// dispatcher and would restart it within seconds, so they must leave it stopped.
+fn stopped_marker() -> PathBuf {
+    let mut p = paths::dispatcher_pid_path().into_os_string();
+    p.push(".stopped");
+    PathBuf::from(p)
+}
+
+pub fn mark_stopped() {
+    let _ = std::fs::write(stopped_marker(), "");
+}
+
+/// The supervising hubs' version of `ensure_running`: never restarts a dispatcher that was
+/// stopped on purpose. Starting opencode again (`oc`, `oc ensure`, a new hub) clears the marker.
+pub fn ensure_running_supervised() -> Result<Option<u32>, String> {
+    match stopped_marker().exists() {
+        true => Ok(None),
+        false => ensure_running(),
+    }
+}
+
 pub fn ensure_running() -> Result<Option<u32>, String> {
+    let _ = std::fs::remove_file(stopped_marker()); // an explicit start
     let pid_file = paths::dispatcher_pid_path();
     let regs = registered();
-    if let Some(pid) = sys::dispatcher_pid(&pid_file) {
-        let ver = regs.iter().find(|(p, _)| *p == pid).map(|(_, v)| v.as_str()).unwrap_or("");
-        if !is_older(ver, VERSION) {
-            // current (or newer than this binary: never replace it) -> keep it, end any duplicates
-            for (p, _) in regs.iter().filter(|(p, _)| *p != pid) {
-                terminate(*p, 3000);
-            }
-            return Ok(None);
-        }
-        log(&format!("replacing dispatcher pid {pid} (version {}) with {VERSION}", if ver.is_empty() { "unknown" } else { ver }));
-        terminate(pid, 3000);
-        let _ = std::fs::remove_file(&pid_file);
-        if ver.is_empty() {
-            sweep_unregistered(); // an old build: its siblings are old too
-        }
+    let Some(pid) = sys::dispatcher_pid(&pid_file) else { return start_dispatcher() };
+    let ver = regs.iter().find(|(p, _)| *p == pid).map(|(_, v)| v.as_str()).unwrap_or("");
+    if !is_older(ver, VERSION) {
+        // current (or newer than this binary: never replace it) -> keep it, end any duplicates
+        terminate_all(regs.iter().map(|(p, _)| *p).filter(|p| *p != pid));
+        return Ok(None);
     }
-    // nobody owns the pidfile: registered strays must not keep running next to the new one
-    for (p, _) in registered() {
-        terminate(p, 3000);
-    }
+    log(&format!("replacing dispatcher pid {pid} (version {}) with {VERSION}", ["unknown", ver][usize::from(!ver.is_empty())]));
+    terminate(pid, 3000);
+    let _ = std::fs::remove_file(&pid_file);
+    // an unregistered one is an old build: its siblings are old too
+    ver.is_empty().then(sweep_unregistered);
+    start_dispatcher()
+}
+
+/// Nobody owns the pidfile: registered strays must not keep running next to the new one.
+fn start_dispatcher() -> Result<Option<u32>, String> {
+    terminate_all(registered().into_iter().map(|(p, _)| p));
     let exe = std::env::current_exe().map_err(e)?;
     sys::spawn_detached(&exe, &["dispatcher"], &log_path()).map(Some).map_err(e)
 }

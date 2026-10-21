@@ -86,6 +86,26 @@ fn parse_info(v: &Value) -> Option<SessionInfo> {
     })
 }
 
+/// The error a session's last turn failed with (e.g. a provider's `HTTP 403`), if that turn ended
+/// after `since_ms`. `session` is `GET /api/session/{id}` data, `messages` the `/message` data.
+pub fn parse_failure(session: &Value, messages: &Value, since_ms: i64) -> Option<String> {
+    if session["outcome"].as_str() != Some("failed") || session["time"]["updated"].as_i64().unwrap_or(0) <= since_ms {
+        return None;
+    }
+    let msg = messages.as_array().into_iter().flatten().find_map(|m| m["error"]["message"].as_str().map(String::from));
+    Some(msg.unwrap_or_else(|| "the agent's turn failed".to_string()))
+}
+
+/// `parse_failure` against the live session.
+pub fn failure_since(id: &str, since_ms: i64) -> Option<String> {
+    let s = sys::api(&bin(), "get", &format!("/api/session/{id}"), None).ok()?;
+    if s["data"]["outcome"].as_str() != Some("failed") {
+        return None; // the common case costs one request
+    }
+    let m = sys::api(&bin(), "get", &format!("/api/session/{id}/message"), None).unwrap_or(Value::Null);
+    parse_failure(&s["data"], &m["data"], since_ms)
+}
+
 /// Cumulative token use and cost of one session, as opencode reports it (`tokens`, `cost`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage {
@@ -262,6 +282,15 @@ pub fn models() -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod usage_tests {
     use super::*;
+
+    #[test]
+    fn a_failed_turn_after_the_hand_over_is_reported_with_its_error() {
+        let session = json!({"outcome":"failed","time":{"updated":2000}});
+        let msgs = json!([{"type":"idle"},{"type":"assistant","error":{"type":"provider.auth","message":"HTTP 403: not licensed"}}]);
+        assert_eq!(parse_failure(&session, &msgs, 1000).as_deref(), Some("HTTP 403: not licensed"));
+        assert_eq!(parse_failure(&session, &msgs, 3000), None, "a failure from before the task was handed over");
+        assert_eq!(parse_failure(&json!({"outcome":"succeeded","time":{"updated":2000}}), &msgs, 1000), None);
+    }
 
     #[test]
     fn parses_the_session_totals_and_diffs_them() {

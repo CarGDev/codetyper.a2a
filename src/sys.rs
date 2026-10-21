@@ -197,14 +197,20 @@ pub fn spawn_detached(exe: &std::path::Path, args: &[&str], log: &std::path::Pat
     use std::os::unix::process::CommandExt;
     let out = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     let err = out.try_clone()?;
-    let child = Command::new(exe)
+    let mut child = Command::new(exe)
         .args(args)
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err)
         .process_group(0)
         .spawn()?;
-    Ok(child.id())
+    let pid = child.id();
+    // a long-lived parent (the hub) must reap it, or a stopped dispatcher stays a zombie that
+    // still answers `kill -0`
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
 }
 
 #[derive(Debug, PartialEq, Eq)]

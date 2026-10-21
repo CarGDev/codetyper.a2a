@@ -121,3 +121,33 @@ fn a_newer_dispatcher_is_never_replaced() {
     sb.oc("stop");
     wait_until("oc stop ends it", || !alive(newer));
 }
+
+#[test]
+fn a_stopped_dispatcher_stays_stopped_until_opencode_is_started_again() {
+    let sb = Sandbox::new("stay");
+    std::fs::create_dir_all(sb.dir.join("agents")).unwrap();
+    // a hub like the ones opencode keeps running: it supervises the dispatcher every second
+    let mut hub = Command::new(env!("CARGO_BIN_EXE_codetypera2a"))
+        .arg("hub")
+        .envs(sb.env())
+        .env("A2A_AGENT_DIR", sb.dir.join("agents"))
+        .env("A2A_SUPERVISE_SECS", "1")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("the hub starts a dispatcher", || pidfile(&sb.dir).is_some_and(alive));
+    let first = pidfile(&sb.dir).unwrap();
+    sb.oc("stop");
+    wait_until("the dispatcher is gone", || !alive(first));
+    std::thread::sleep(Duration::from_millis(3500)); // several supervision rounds
+    assert!(pidfile(&sb.dir).is_none_or(|p| !alive(p)), "the supervising hub restarted a stopped dispatcher");
+    sb.oc("ensure"); // starting again is explicit
+    wait_until("it is started again", || pidfile(&sb.dir).is_some_and(alive));
+    sb.oc("stop");
+    let _ = hub.kill();
+    let _ = hub.wait();
+}

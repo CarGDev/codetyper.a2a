@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-10-21
+
+### Fixed
+
+- A task whose agent's turn fails (for example a provider `HTTP 403`) now fails at once with that error (`agent_error`) instead of sitting in `submitted` until the stall timeout.
+- `oc stop` / `oc shutdown` left the dispatcher stopped for a few seconds only: the hubs opencode keeps running restarted it every 15 s. A `.stopped` marker now stops that until `oc`, `oc ensure` or a new hub starts it explicitly; detached children are also reaped so a stopped dispatcher is not left as a zombie.
+- The exit cleanup no longer prints `N other opencode(s) still running` (its output could end up in the dispatcher log).
+
 ## [1.3.1] - 2026-10-21
 
 ### Added

@@ -710,7 +710,7 @@ pub fn run() -> i32 {
         let every = std::time::Duration::from_secs(crate::paths::env_u64("A2A_SUPERVISE_SECS", 15));
         std::thread::spawn(move || loop {
             std::thread::sleep(every);
-            match crate::dispatcher::dispatcher::ensure_running() {
+            match crate::dispatcher::dispatcher::ensure_running_supervised() {
                 Ok(Some(pid)) => eprintln!("a2a-hub: dispatcher was not running; restarted (pid {pid})"),
                 Ok(None) => {}
                 Err(err) => eprintln!("a2a-hub: could not restart the dispatcher: {err}"),

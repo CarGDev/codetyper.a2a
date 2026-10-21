@@ -48,7 +48,7 @@ impl Env {
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2 $3\" in\n  \"get /api/session/active\") echo '{{\"data\":{{}}}}';;\n  \"get /api/session/orch1\") echo '{{\"data\":{{\"id\":\"orch1\",\"agent\":\"orchestrator\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}';;\n  \"get /api/session/ses_m1\") if [ -f {dir}/ses_m1.json ]; then cat {dir}/ses_m1.json; else echo '{{\"data\":{{\"id\":\"ses_m1\",\"agent\":\"mentor\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}'; fi;;\n  \"get /api/agent\"*) echo '{{\"data\":[{{\"id\":\"mentor\",\"description\":\"m\",\"mode\":\"primary\",\"hidden\":false,\"model\":{{\"id\":\"claude-haiku-5.5\",\"providerID\":\"github-copilot\",\"variant\":\"high\"}}}}]}}';;\n  \"post /api/session/\"*\"/prompt\") if [ -f {dir}/fail_prompt ]; then echo \"HTTP 404 Not Found\" >&2; exit 1; fi;;\n  \"get /api/session/ses_c\"*) echo \"{{\\\"data\\\":{{\\\"id\\\":\\\"$3\\\",\\\"agent\\\":\\\"mentor\\\",\\\"location\\\":{{\\\"directory\\\":\\\"/tmp/projx\\\"}},\\\"time\\\":{{\\\"created\\\":1,\\\"updated\\\":2}}}}}}\" | sed \"s#/api/session/##\";;\n  \"post /api/session\") n=$(cat {dir}/cnt 2>/dev/null || echo 0); n=$((n+1)); echo $n > {dir}/cnt; if [ -f {dir}/fresh_ids ]; then id=ses_c$n; else id=ses_m1; fi; echo \"{{\\\"data\\\":{{\\\"id\\\":\\\"$id\\\"}}}}\";;\nesac\n",
+                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2 $3\" in\n  \"get /api/session/active\") echo '{{\"data\":{{}}}}';;\n  \"get /api/session/orch1\") echo '{{\"data\":{{\"id\":\"orch1\",\"agent\":\"orchestrator\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}';;\n  \"get /api/session/ses_m1\") if [ -f {dir}/ses_m1.json ]; then cat {dir}/ses_m1.json; else echo '{{\"data\":{{\"id\":\"ses_m1\",\"agent\":\"mentor\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}'; fi;;\n  \"get /api/agent\"*) echo '{{\"data\":[{{\"id\":\"mentor\",\"description\":\"m\",\"mode\":\"primary\",\"hidden\":false,\"model\":{{\"id\":\"claude-haiku-5.5\",\"providerID\":\"github-copilot\",\"variant\":\"high\"}}}}]}}';;\n  \"get /api/session/ses_m1/message\") if [ -f {dir}/ses_m1_messages.json ]; then cat {dir}/ses_m1_messages.json; else echo '{{\"data\":[]}}'; fi;;\n  \"post /api/session/\"*\"/prompt\") if [ -f {dir}/fail_prompt ]; then echo \"HTTP 404 Not Found\" >&2; exit 1; fi;;\n  \"get /api/session/ses_c\"*) echo \"{{\\\"data\\\":{{\\\"id\\\":\\\"$3\\\",\\\"agent\\\":\\\"mentor\\\",\\\"location\\\":{{\\\"directory\\\":\\\"/tmp/projx\\\"}},\\\"time\\\":{{\\\"created\\\":1,\\\"updated\\\":2}}}}}}\" | sed \"s#/api/session/##\";;\n  \"post /api/session\") n=$(cat {dir}/cnt 2>/dev/null || echo 0); n=$((n+1)); echo $n > {dir}/cnt; if [ -f {dir}/fresh_ids ]; then id=ses_c$n; else id=ses_m1; fi; echo \"{{\\\"data\\\":{{\\\"id\\\":\\\"$id\\\"}}}}\";;\nesac\n",
                 log = dir.join("calls.log").display(),
                 dir = dir.display()
             ),
@@ -292,5 +292,23 @@ fn the_dispatcher_never_opens_an_orchestrator_session() {
         rows(&env, &format!("SELECT state FROM tasks WHERE id = '{id}'")) == vec!["input-required"]
     });
     assert_eq!(env.calls("post /api/session -d"), 0, "no orchestrator session is opened");
+    let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+#[test]
+fn a_task_fails_at_once_when_the_agents_turn_failed() {
+    let env = Env::new("agenterr");
+    let _d = env.dispatcher("e.pid");
+    let task = env.hub("send_message", json!({"from":"orchestrator","to":"mentor","text":"hi","directory":"/tmp/projx","sessionId":"orch1"}));
+    let id = task["id"].as_str().unwrap().to_string();
+    wait_for("the task is handed over", || !rows(&env, "SELECT 'x' FROM nudges WHERE kind = 'assignee' AND status = 'delivered'").is_empty());
+    // the mentor's session now reports a failed turn (e.g. provider 403)
+    let failed = json!({"data":{"id":"ses_m1","agent":"mentor","location":{"directory":"/tmp/projx"},"outcome":"failed",
+        "time":{"created":1,"updated": 99_999_999_999_999_i64}}});
+    std::fs::write(env.dir.join("ses_m1.json"), failed.to_string()).unwrap();
+    std::fs::write(env.dir.join("ses_m1_messages.json"), r#"{"data":[{"type":"assistant","error":{"message":"HTTP 403: not licensed"}}]}"#).unwrap();
+    wait_for("the task fails with the agent's error", || rows(&env, &format!("SELECT state FROM tasks WHERE id = '{id}'")) == vec!["failed"]);
+    let msg = rows(&env, &format!("SELECT status_message FROM tasks WHERE id = '{id}'"));
+    assert!(msg[0].contains("agent_error") && msg[0].contains("HTTP 403"), "{}", msg[0]);
     let _ = std::fs::remove_dir_all(&env.dir);
 }

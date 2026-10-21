@@ -126,7 +126,7 @@ fn shutdown_waits_for_the_last_opencode_then_ends_everything() {
     std::fs::write(clients.join(b.id().to_string()), "").unwrap();
     // one of them exits: the other is still running, so nothing is touched
     let (out, _) = oc(&dir, &["shutdown", "--client", &a.id().to_string()]);
-    assert!(out.contains("still running"), "{out}");
+    assert!(out.trim().is_empty(), "leaving things alone is silent: {out}");
     assert_eq!(states(&c), ["submitted", "working", "input-required", "auth-required", "completed"]);
     // the last one exits: tasks are canceled, the running turn is interrupted, sessions retired
     let (out, ok) = oc(&dir, &["shutdown", "--client", &b.id().to_string()]);

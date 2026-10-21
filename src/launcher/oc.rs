@@ -326,8 +326,8 @@ fn shutdown_if_last(me: u32, force: bool) -> i32 {
         return 0;
     }
     let others: Vec<u32> = live_clients().into_iter().filter(|p| *p != me).collect();
+    // silent: this runs on every opencode exit and its output can land in the dispatcher log
     if !force && !others.is_empty() {
-        println!("{} other opencode(s) still running: leaving the dispatcher and tasks alone", others.len());
         return 0;
     }
     shutdown()
