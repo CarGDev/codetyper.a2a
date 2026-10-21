@@ -11,6 +11,12 @@
 //!   oc open-project <dir> [--prompt <text>]
 //!                       open <dir> in its own tmux tab running `oc`; with --prompt, hand the text to
 //!                       that tab's orchestrator
+//!   oc cancel <--all | task... | --context <ctx> | --dir <folder>> [--no-interrupt] [--yes]
+//!                       cancel open tasks and stop the turns that are working on them
+//!   oc shutdown [--force]
+//!                       end this setup: cancel open tasks, interrupt running turns, retire the
+//!                       sessions, stop the dispatcher and close the status tab. Runs by itself when
+//!                       the last opencode started through `oc` exits (A2A_KEEP_RUNNING=1 disables)
 //!   oc continue <ctx>   allow another DISPATCH_MAX_HOPS hops for a context that hit the hop cap
 //!
 //! ONE dispatcher serves all projects (it reads the folder from each task). It is single-instance
@@ -41,6 +47,11 @@ COMMANDS:
   oc open-project <dir> [--prompt <text>]
                         open <dir> in its own tmux tab (running `oc`); with --prompt, send the text
                         to that project's orchestrator
+  oc cancel --all       cancel every open task and interrupt the turns working on them
+  oc cancel <task>...   cancel the given tasks (id or 8-char prefix); also --context <ctx>,
+                        --dir <folder>; --no-interrupt keeps running turns going; --yes skips asking
+  oc shutdown           cancel open tasks, stop running turns and the dispatcher (automatic when
+                        the last opencode started with `oc` exits; --force ignores other opencodes)
   oc continue <ctx>     allow more hops for a context that hit the hop cap
   oc trace <task-id>    timeline of one task (id or 8-char prefix): events, offsets, duration
   oc stats              per-agent summary: tasks, nudges, average duration, tokens/cost
@@ -158,15 +169,208 @@ fn open_project(args: &[String]) -> i32 {
     die(&format!("no opencode session appeared in {dir} within {wait}s; send the prompt from its tab"))
 }
 
+const OPEN_STATES: &str = "WHERE state IN ('submitted','working','input-required','auth-required') ORDER BY created_at";
+
+/// `oc cancel`: cancel open tasks from the terminal and stop the turns that work on them.
+fn cancel(args: &[String]) -> i32 {
+    cancel_inner(args).0
+}
+
+/// Returns the exit code and the sessions that were interrupted.
+fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
+    const USAGE: &str = "usage: oc cancel <--all | task-id... | --context <ctx> | --dir <folder>> [--no-interrupt] [--yes]";
+    let (mut all, mut interrupt, mut yes) = (false, true, false);
+    let (mut ids, mut ctx, mut dir) = (Vec::<String>::new(), None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--all" => all = true,
+            "--no-interrupt" => interrupt = false,
+            "--yes" | "-y" => yes = true,
+            "--context" => ctx = it.next().cloned(),
+            "--dir" => dir = it.next().cloned(),
+            id if !id.starts_with('-') => ids.push(id.to_string()),
+            _ => die(USAGE),
+        }
+    }
+    if !all && ids.is_empty() && ctx.is_none() && dir.is_none() {
+        die(USAGE);
+    }
+    let d = ok(db::open(&paths::db_path()));
+    let dir = dir.map(|x| std::fs::canonicalize(&x).map(|p| p.display().to_string()).unwrap_or(x));
+    let tasks: Vec<_> = ok(db::tasks(&d, OPEN_STATES, &[]))
+        .into_iter()
+        .filter(|t| {
+            all || ids.iter().any(|i| t.id.starts_with(i.as_str()))
+                || ctx.as_deref() == Some(t.context_id.as_str())
+                || dir.as_deref().is_some_and(|x| {
+                    [t.directory.as_deref(), t.from_directory.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|td| crate::hub::project::same_project(x, td))
+                })
+        })
+        .collect();
+    if tasks.is_empty() {
+        println!("no open tasks to cancel");
+        return (0, Default::default());
+    }
+    for t in &tasks {
+        println!("{} {:<14} {} -> {} ctx={}", &t.id[..8.min(t.id.len())], t.state, t.from_agent, t.to_agent, t.context_id);
+    }
+    if !yes && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        use std::io::Write;
+        print!("Cancel {} task(s)? [y/N] ", tasks.len());
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        if !line.trim().eq_ignore_ascii_case("y") {
+            println!("nothing canceled");
+            return (0, Default::default());
+        }
+    }
+    ok(d.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string()));
+    let mut canceled = vec![];
+    for t in &tasks {
+        let ts = db::now();
+        let msg = serde_json::json!({
+            "messageId": uuid::Uuid::new_v4().to_string(), "role": "agent", "from": "user",
+            "parts": [{ "text": "canceled by user (oc cancel)" }], "taskId": t.id,
+        });
+        let mut history: serde_json::Value = serde_json::from_str(&t.history).unwrap_or(serde_json::json!([]));
+        if let Some(h) = history.as_array_mut() {
+            h.push(msg.clone());
+        }
+        let n = d
+            .execute(
+                "UPDATE tasks SET state='canceled', status_message=?, history=?, updated_at=?, completed_at=?, version=version+1
+                 WHERE id=? AND state IN ('submitted','working','input-required','auth-required')",
+                rusqlite::params![msg.to_string(), history.to_string(), ts, ts, t.id],
+            )
+            .unwrap_or(0);
+        if n == 1 {
+            db::record_event(&d, Some(&t.id), Some(&t.context_id), "state_change", Some("user"), Some("canceled"));
+            // nothing may still be delivered for a canceled task
+            let _ = d.execute(
+                "UPDATE nudges SET status='dead', last_error='task canceled', updated_at=?, claimed_by=NULL, claim_expires_at=NULL
+                 WHERE task_id=? AND status IN ('pending','claimed')",
+                rusqlite::params![ts, t.id],
+            );
+            canceled.push(t);
+        }
+    }
+    ok(d.execute_batch("COMMIT").map_err(|e| e.to_string()));
+    println!("canceled {} task(s)", canceled.len());
+    if !interrupt {
+        return (0, Default::default());
+    }
+    // stop the turns that are running right now for those tasks (they would keep spending tokens)
+    let running = opencode::active_ids().unwrap_or_default();
+    let mut stopped = std::collections::BTreeSet::new(); // sessions interrupted (once each)
+    for t in &canceled {
+        let Some(dir) = t.directory.as_deref().or(t.from_directory.as_deref()) else { continue };
+        let rows = db::sessions(&d, "WHERE agent = ? AND status = 'live'", &[&t.to_agent]).unwrap_or_default();
+        for r in rows.iter().filter(|r| r.directory == dir || crate::hub::project::same_project(dir, &r.directory)) {
+            if !running.contains(&r.session_id) || !stopped.insert(r.session_id.clone()) {
+                continue;
+            }
+            match opencode::interrupt(&r.session_id) {
+                Ok(()) => println!("interrupted {} (session {})", t.to_agent, r.session_id),
+                Err(e) => {
+                    eprintln!("could not interrupt session {}: {e}", r.session_id);
+                    if e.contains("404") {
+                        let _ = d.execute("UPDATE sessions SET status='stale' WHERE session_id = ?", [&r.session_id]);
+                    }
+                }
+            }
+        }
+    }
+    (0, stopped)
+}
+
+fn clients_dir() -> std::path::PathBuf {
+    let mut p = paths::dispatcher_pid_path().into_os_string();
+    p.push(".clients");
+    std::path::PathBuf::from(p)
+}
+
+/// Remember that an opencode (pid) is running against this setup.
+fn register_client(pid: u32) {
+    let dir = clients_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(pid.to_string()), "");
+}
+
+/// pids of registered opencodes that are still alive (dead ones are forgotten).
+fn live_clients() -> Vec<u32> {
+    let Ok(rd) = std::fs::read_dir(clients_dir()) else { return vec![] };
+    let mut out = vec![];
+    for e in rd.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        if sys::pid_alive(pid) {
+            out.push(pid);
+        } else {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    out
+}
+
+/// An opencode that was registered (pid `me`) is done: when no other one is left, end everything
+/// this setup started. `force` ends it regardless of other opencodes.
+fn shutdown_if_last(me: u32, force: bool) -> i32 {
+    if me != 0 {
+        let _ = std::fs::remove_file(clients_dir().join(me.to_string()));
+    }
+    if std::env::var("A2A_KEEP_RUNNING").as_deref() == Ok("1") {
+        return 0;
+    }
+    let others: Vec<u32> = live_clients().into_iter().filter(|p| *p != me).collect();
+    if !force && !others.is_empty() {
+        println!("{} other opencode(s) still running: leaving the dispatcher and tasks alone", others.len());
+        return 0;
+    }
+    shutdown()
+}
+
+/// Cancel open tasks, interrupt every running turn, retire the sessions, stop the dispatcher and
+/// close the live-status tab.
+fn shutdown() -> i32 {
+    // open tasks and the turns working on them
+    let (_, interrupted) = cancel_inner(&["--all".to_string(), "--yes".to_string()]);
+    if let Ok(d) = db::open(&paths::db_path()) {
+        // any other turn of a session this setup opened is still spending tokens
+        let running = opencode::active_ids().unwrap_or_default();
+        for r in db::sessions(&d, "WHERE status = 'live'", &[]).unwrap_or_default() {
+            if running.contains(&r.session_id) && !interrupted.contains(&r.session_id) {
+                match opencode::interrupt(&r.session_id) {
+                    Ok(()) => println!("interrupted {} (session {})", r.agent, r.session_id),
+                    Err(e) => eprintln!("could not interrupt session {}: {e}", r.session_id),
+                }
+            }
+        }
+        let _ = d.execute("UPDATE sessions SET status='ended', ended_at=? WHERE status='live'", [db::now()]);
+    }
+    crate::dispatcher::dispatcher::stop_all();
+    crate::dispatcher::dispatcher::sweep_unregistered();
+    let _ = sys::tmux(&["kill-window", "-t", "a2a-status"]);
+    println!("a2a stopped: tasks canceled, turns interrupted, sessions retired, dispatcher stopped");
+    0
+}
+
 fn run_opencode(args: &[String]) -> i32 {
     ensure_dispatcher();
-    Command::new(opencode::bin())
+    let me = std::process::id();
+    register_client(me);
+    let code = Command::new(opencode::bin())
         .args(args)
         .stdin(Stdio::inherit())
         .status()
         .ok()
         .and_then(|s| s.code())
-        .unwrap_or(1)
+        .unwrap_or(1);
+    shutdown_if_last(me, false);
+    code
 }
 
 pub fn run(args: &[String]) -> i32 {
@@ -181,7 +385,18 @@ pub fn run(args: &[String]) -> i32 {
         Some("help" | "--help" | "-h") => print!("{OC_HELP}"),
         Some("version" | "--version" | "-V") => println!("oc {}", env!("CARGO_PKG_VERSION")),
         // dispatcher + live status tab, without starting opencode (what the tabs plugin runs)
-        Some("ensure") => ensure_dispatcher(),
+        Some("ensure") => {
+            // `--client <pid>`: an opencode (the tabs plugin's TUI) that counts as running
+            if let (Some("--client"), Some(pid)) = (arg, args.get(2).and_then(|p| p.parse::<u32>().ok())) {
+                register_client(pid);
+            }
+            ensure_dispatcher()
+        }
+        Some("shutdown") => {
+            let force = args[1..].iter().any(|a| a == "--force");
+            let client = args.iter().position(|a| a == "--client").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
+            return shutdown_if_last(client.unwrap_or(0), force);
+        }
         Some("dispatch") => return crate::dispatcher::dispatcher::run(),
         Some("watch") => return watch(),
         Some("agent" | "open") => {
@@ -194,12 +409,9 @@ pub fn run(args: &[String]) -> i32 {
             println!("session {} -> agent {agent}", s.id);
         }
         Some("stop") => {
-            match sys::dispatcher_pid(&paths::dispatcher_pid_path()) {
-                Some(pid) => sys::kill_term(pid),
-                None => {
-                    let _ = Command::new("pkill").args(["-f", "codetypera2a dispatcher"]).status();
-                }
-            }
+            // every dispatcher of this database, not just the pidfile owner
+            crate::dispatcher::dispatcher::stop_all();
+            crate::dispatcher::dispatcher::sweep_unregistered();
             println!("dispatcher stopped");
         }
         Some("continue") => {
@@ -216,6 +428,7 @@ pub fn run(args: &[String]) -> i32 {
             println!("context {ctx}: allowance is now {} hops (+{max_hops})", max_hops * (1 + g));
         }
         Some("open-project") => return open_project(&args[1..]),
+        Some("cancel") => return cancel(&args[1..]),
         Some("trace") => {
             let Some(id) = arg else { die("usage: oc trace <task-id-or-prefix>") };
             let d = ok(db::open(&paths::db_path()));

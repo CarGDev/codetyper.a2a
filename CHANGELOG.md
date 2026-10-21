@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-21
+
+### Added
+
+- Exiting opencode ends the setup: when the last opencode started through `oc` (or the tabs plugin) exits, open tasks are canceled, running turns are interrupted, the sessions are retired, the dispatcher stops and the `a2a-status` tab closes. Other opencodes still running keep it alive; `A2A_KEEP_RUNNING=1` disables it; `oc shutdown [--force]` does it by hand.
+- `oc cancel <--all | task... | --context <ctx> | --dir <folder>>`: cancel open tasks from the terminal, mark their pending deliveries dead, and interrupt the turns that are running for them (`--no-interrupt` to leave those alone).
+
+### Fixed
+
+- Old dispatchers survived upgrades and ran next to the new one: against the new schema they failed (`NOT NULL constraint failed: nudges.updated_at`) and each opened its own session, so every task spawned several orchestrator/agent tabs. Dispatchers now register their version; `oc`/`oc ensure` replace an older one (never a newer one), and `oc stop` ends every dispatcher of the database. Dispatchers from before this version cannot be fixed: run `pkill -f "codetypera2a dispatcher"` once.
+- Delivery to a session whose folder no longer exists (a moved project) returned `HTTP 404` and was retried forever. Such sessions are retired and replaced, a task for a missing folder fails with `directory_missing`, and a failing delivery is retried 5 times with growing waits, then reported on the task as `delivery_failed` instead of looping.
+- The dispatcher never opens an `orchestrator` session: there is one orchestrator per project, the user's own, and results return to it. The hub refuses a task sent to oneself or to `orchestrator`.
+
 ## [1.3.0] - 2026-10-21
 
 ### Added

@@ -9,7 +9,7 @@ its own session, shown as a tab in the opencode you already have open: an orches
 routes and delegates; a dispatcher wakes the right agent's tab and reports back to the
 orchestrator's. One binary, no Node.
 
-Current version: **1.3.0** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.3.1** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## How a task travels
 
@@ -55,7 +55,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 1.3.0
+codetypera2a --version        # codetypera2a 1.3.1
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
@@ -154,9 +154,11 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 | `oc status`            | dispatcher state, running sessions, open tasks                      |
 | `oc watch`             | live view of the dispatcher log (what the tmux window shows)        |
 | `oc dispatch`          | run the dispatcher in this pane (foreground)                        |
-| `oc stop`              | stop the dispatcher                                                 |
+| `oc stop`              | stop every dispatcher of this database (after an upgrade `oc` then starts the current one) |
 | `oc continue <ctx>`    | allow more hops for a context that hit the hop cap                  |
 | `oc trace <task>`      | timeline of one task (id or 8-character prefix): sender, claim, delivery, state changes, duration |
+| `oc shutdown`          | end everything: cancel open tasks, interrupt running turns, retire sessions, stop the dispatcher (runs automatically when the last opencode exits; `A2A_KEEP_RUNNING=1` disables) |
+| `oc cancel`            | cancel open tasks (`--all`, task ids, `--context`, `--dir`) and interrupt the turns working on them |
 | `oc stats`             | per-agent summary: tasks, deliveries, average duration, tokens in/out and cost (opencode's figure, or an estimate from the price table when it reports 0) |
 | `codetypera2a eval`    | replay the deterministic scenarios (routing, hop cap, no duplicate nudges, seeded-bug reviewer); `--list` shows them |
 | `codetypera2a --version` | print the version (also `-V`, `version`; `oc --version` too)      |

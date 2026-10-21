@@ -115,8 +115,13 @@ found. This is about the user's project, never the A2A hub's own tables.
 
 ONLY when the user says they are working on different projects or asks you to check other projects: for
 each project folder run `oc open-project <dir> --prompt "<self-contained task>"`. It opens a tmux tab per
-project running `oc` and hands the task to that project's orchestrator. Then report a table (project |
-tab | task). Never open tabs otherwise.
+project running `oc` and hands the task to that project's own orchestrator, which works independently:
+its result stays in that tab, so do not wait for it. Then report a table (project | tab | task). Never
+open tabs otherwise.
+
+There is exactly ONE orchestrator per project, and it is you. Never send a task to `orchestrator` with
+`a2a_send_message` (the hub refuses it, and it would only open another orchestrator). Every agent you
+delegate to reports back to this session on the task you sent it.
 
 ## Workflow
 

@@ -269,6 +269,14 @@ impl Hub {
                 return Ok(row_to_task(&self.row(task_id)?, 10));
             }
             let to = need(a, "to")?;
+            if to == from {
+                return Err(format!(
+                    "'{from}' cannot send a task to itself (it would never be delivered): delegate to a different agent, or do the work yourself"
+                ));
+            }
+            if to == "orchestrator" {
+                return Err("do not send a new task to the orchestrator (that would open another orchestrator session): report on the task you were given with update_task (completed / input-required) so the result returns to the one orchestrator that sent it".into());
+            }
             let id = uuid();
             let msg = mk_message(
                 "user",

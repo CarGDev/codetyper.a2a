@@ -8,6 +8,29 @@ use std::time::Duration;
 
 const BIN: &str = env!("CARGO_BIN_EXE_codetypera2a");
 
+/// A child process that is killed when dropped, so a failing assertion never leaks a dispatcher.
+struct Proc(Child);
+
+impl std::ops::Deref for Proc {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Proc {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for Proc {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 struct Env {
     dir: PathBuf,
 }
@@ -17,13 +40,15 @@ impl Env {
         let dir = std::env::temp_dir().join(format!("a2a-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("agents")).unwrap();
+        // the dispatcher only uses sessions and tasks whose folder exists
+        std::fs::create_dir_all("/tmp/projx").unwrap();
         std::fs::write(dir.join("agents/mentor.md"), "---\ndescription: m\n---\n").unwrap();
         // a fake `opencode`: logs every call, answers the few routes the dispatcher uses
         let stub = dir.join("opencode");
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2 $3\" in\n  \"get /api/session/active\") echo '{{\"data\":{{}}}}';;\n  \"get /api/session/orch1\") echo '{{\"data\":{{\"id\":\"orch1\",\"agent\":\"orchestrator\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}';;\n  \"get /api/session/ses_m1\") if [ -f {dir}/ses_m1.json ]; then cat {dir}/ses_m1.json; else echo '{{\"data\":{{\"id\":\"ses_m1\",\"agent\":\"mentor\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}'; fi;;\n  \"get /api/agent\"*) echo '{{\"data\":[{{\"id\":\"mentor\",\"description\":\"m\",\"mode\":\"primary\",\"hidden\":false,\"model\":{{\"id\":\"claude-haiku-5.5\",\"providerID\":\"github-copilot\",\"variant\":\"high\"}}}}]}}';;\n  \"post /api/session\") echo '{{\"data\":{{\"id\":\"ses_m1\"}}}}';;\nesac\n",
+                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2 $3\" in\n  \"get /api/session/active\") echo '{{\"data\":{{}}}}';;\n  \"get /api/session/orch1\") echo '{{\"data\":{{\"id\":\"orch1\",\"agent\":\"orchestrator\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}';;\n  \"get /api/session/ses_m1\") if [ -f {dir}/ses_m1.json ]; then cat {dir}/ses_m1.json; else echo '{{\"data\":{{\"id\":\"ses_m1\",\"agent\":\"mentor\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}'; fi;;\n  \"get /api/agent\"*) echo '{{\"data\":[{{\"id\":\"mentor\",\"description\":\"m\",\"mode\":\"primary\",\"hidden\":false,\"model\":{{\"id\":\"claude-haiku-5.5\",\"providerID\":\"github-copilot\",\"variant\":\"high\"}}}}]}}';;\n  \"post /api/session/\"*\"/prompt\") if [ -f {dir}/fail_prompt ]; then echo \"HTTP 404 Not Found\" >&2; exit 1; fi;;\n  \"get /api/session/ses_c\"*) echo \"{{\\\"data\\\":{{\\\"id\\\":\\\"$3\\\",\\\"agent\\\":\\\"mentor\\\",\\\"location\\\":{{\\\"directory\\\":\\\"/tmp/projx\\\"}},\\\"time\\\":{{\\\"created\\\":1,\\\"updated\\\":2}}}}}}\" | sed \"s#/api/session/##\";;\n  \"post /api/session\") n=$(cat {dir}/cnt 2>/dev/null || echo 0); n=$((n+1)); echo $n > {dir}/cnt; if [ -f {dir}/fresh_ids ]; then id=ses_c$n; else id=ses_m1; fi; echo \"{{\\\"data\\\":{{\\\"id\\\":\\\"$id\\\"}}}}\";;\nesac\n",
                 log = dir.join("calls.log").display(),
                 dir = dir.display()
             ),
@@ -43,6 +68,7 @@ impl Env {
             .env("OPENCODE_BIN", self.dir.join("opencode"))
             .env("A2A_NO_DISPATCHER", "1")
             .env("DISPATCH_POLL_MS", "100")
+            .env("DISPATCH_RETRY_BASE_MS", "50")
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
             .stdin(Stdio::null())
@@ -51,8 +77,8 @@ impl Env {
         c
     }
 
-    fn dispatcher(&self, pidfile: &str) -> Child {
-        self.cmd("dispatcher", pidfile).spawn().unwrap()
+    fn dispatcher(&self, pidfile: &str) -> Proc {
+        Proc(self.cmd("dispatcher", pidfile).spawn().unwrap())
     }
 
     /// One MCP tool call against a short-lived hub process.
@@ -72,19 +98,18 @@ impl Env {
     }
 }
 
-fn stop(mut c: Child) {
-    let _ = c.kill();
-    let _ = c.wait();
+fn stop(c: Proc) {
+    drop(c);
 }
 
-fn alive(c: &mut Child) -> bool {
+fn alive(c: &mut Proc) -> bool {
     c.try_wait().unwrap().is_none()
 }
 
 #[test]
 fn a_stampede_of_dispatchers_leaves_exactly_one() {
     let env = Env::new("stampede");
-    let mut all: Vec<Child> = (0..8).map(|_| env.dispatcher("same.pid")).collect();
+    let mut all: Vec<Proc> = (0..8).map(|_| env.dispatcher("same.pid")).collect();
     std::thread::sleep(Duration::from_millis(1500));
     let running = all.iter_mut().filter_map(|c| alive(c).then_some(())).count();
     all.into_iter().for_each(stop);
@@ -177,5 +202,95 @@ fn what_an_agent_spends_on_a_task_is_recorded_and_priced() {
     assert_eq!((tin, tout), (Some(1_000_000), Some(1_000_000)), "only the delta since the baseline");
     // claude-haiku-5.5 is $0.10 in / $0.50 out per 1M tokens and opencode charged 0: estimated
     assert!((cost.unwrap() - 0.60).abs() < 1e-6, "{cost:?}");
+    let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+fn rows(env: &Env, sql: &str) -> Vec<String> {
+    let c = rusqlite::Connection::open(env.dir.join("hub.db")).unwrap();
+    let mut st = c.prepare(sql).unwrap();
+    st.query_map([], |r| r.get::<_, String>(0)).unwrap().flatten().collect()
+}
+
+fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
+    for _ in 0..150 {
+        if f() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("timed out waiting for: {what}");
+}
+
+#[test]
+fn a_session_whose_folder_is_gone_is_retired_and_replaced() {
+    let env = Env::new("moved");
+    // the mentor's registered session lives in a folder that no longer exists (project moved)
+    env.hub("register_agent", json!({"name":"mentor","sessionId":"ses_m1","directory":"/tmp/projx"}));
+    let gone = json!({"data":{"id":"ses_m1","agent":"mentor","location":{"directory":"/definitely/not/here"},"time":{"created":1,"updated":2}}});
+    std::fs::write(env.dir.join("ses_m1.json"), gone.to_string()).unwrap();
+    std::fs::write(env.dir.join("fresh_ids"), "").unwrap();
+    let _d = env.dispatcher("m.pid");
+    env.hub("send_message", json!({"from":"orchestrator","to":"mentor","text":"hi","directory":"/tmp/projx","sessionId":"orch1"}));
+    wait_for("the prompt reaches a new session", || env.calls("post /api/session/ses_c1/prompt") == 1);
+    assert_eq!(env.calls("post /api/session -d"), 1, "exactly one new session");
+    assert_eq!(env.calls("post /api/session/ses_m1/prompt"), 0, "nothing is sent to the dead session");
+    assert_eq!(rows(&env, "SELECT status FROM sessions WHERE session_id = 'ses_m1'"), vec!["stale"]);
+    let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+#[test]
+fn delivery_that_keeps_failing_gives_up_and_tells_the_requester() {
+    let env = Env::new("always404");
+    std::fs::write(env.dir.join("fail_prompt"), "").unwrap();
+    std::fs::write(env.dir.join("fresh_ids"), "").unwrap();
+    let _d = env.dispatcher("f.pid");
+    let task = env.hub("send_message", json!({"from":"orchestrator","to":"mentor","text":"hi","directory":"/tmp/projx","sessionId":"orch1"}));
+    let id = task["id"].as_str().unwrap().to_string();
+    wait_for("the nudge is given up", || {
+        !rows(&env, "SELECT 'x' FROM nudges WHERE kind = 'assignee' AND status = 'dead'").is_empty()
+    });
+    // the requester is told about the failure too (and that wake-up fails the same way), so only
+    // the mentor's sessions are counted: one retired session, then a fresh one tried 4 more times
+    let to_mentor = |e: &Env| e.calls("/api/session/ses_c1/prompt") + e.calls("/api/session/ses_c2/prompt");
+    assert_eq!(to_mentor(&env), 5, "five attempts, then it stops");
+    assert_eq!(env.calls("post /api/session -d"), 2, "one replacement session, not one per attempt");
+    let state = rows(&env, &format!("SELECT state FROM tasks WHERE id = '{id}'"));
+    assert_eq!(state, vec!["input-required"]);
+    let msg = rows(&env, &format!("SELECT status_message FROM tasks WHERE id = '{id}'"));
+    assert!(msg[0].contains("delivery_failed"), "{}", msg[0]);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(to_mentor(&env), 5, "no further attempts after giving up");
+    let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+#[test]
+fn a_task_for_a_folder_that_does_not_exist_fails_at_once() {
+    let env = Env::new("nodir");
+    let _d = env.dispatcher("n.pid");
+    let task = env.hub("send_message", json!({"from":"orchestrator","to":"mentor","text":"hi","directory":"/no/such/project","sessionId":"orch1"}));
+    let id = task["id"].as_str().unwrap().to_string();
+    wait_for("the task fails", || rows(&env, &format!("SELECT state FROM tasks WHERE id = '{id}'")) == vec!["failed"]);
+    let msg = rows(&env, &format!("SELECT status_message FROM tasks WHERE id = '{id}'"));
+    assert!(msg[0].contains("directory_missing"), "{}", msg[0]);
+    assert_eq!(env.calls("post /api/session -d"), 0, "no session is opened in a missing folder");
+    let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+#[test]
+fn the_dispatcher_never_opens_an_orchestrator_session() {
+    let env = Env::new("noorch");
+    std::fs::write(env.dir.join("agents/orchestrator.md"), "---\ndescription: o\n---\n").unwrap();
+    let task = env.hub("send_message", json!({"from":"orchestrator","to":"mentor","text":"hi","directory":"/tmp/projx","sessionId":"orch1"}));
+    let id = task["id"].as_str().unwrap().to_string();
+    // a task that reached the orchestrator some other way (older hub, manual edit)
+    let c = rusqlite::Connection::open(env.dir.join("hub.db")).unwrap();
+    c.execute("INSERT OR IGNORE INTO agents (name, card, created_at, updated_at) VALUES ('orchestrator','{}','t','t'), ('brain','{}','t','t')", []).unwrap();
+    c.execute("UPDATE tasks SET from_agent='brain', to_agent='orchestrator', from_session=NULL WHERE id = ?", [&id]).unwrap();
+    drop(c);
+    let _d = env.dispatcher("o.pid");
+    wait_for("the task is told there is no orchestrator", || {
+        rows(&env, &format!("SELECT state FROM tasks WHERE id = '{id}'")) == vec!["input-required"]
+    });
+    assert_eq!(env.calls("post /api/session -d"), 0, "no orchestrator session is opened");
     let _ = std::fs::remove_dir_all(&env.dir);
 }

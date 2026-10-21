@@ -106,3 +106,15 @@ fn a_task_sent_by_name_can_only_be_claimed_by_that_agent() {
     env.hub("claim_task", json!({"id": id, "agent": "mentor"})).unwrap();
     let _ = std::fs::remove_dir_all(&env.0);
 }
+
+#[test]
+fn nobody_sends_a_task_to_itself_or_to_the_orchestrator() {
+    let env = Env::new("selfsend");
+    let err = env.hub("send_message", json!({"from":"mentor","to":"mentor","text":"x","directory":"/tmp/p"})).unwrap_err();
+    assert!(err.contains("cannot send a task to itself"), "{err}");
+    let err = env.hub("send_message", json!({"from":"brain","to":"orchestrator","text":"x","directory":"/tmp/p"})).unwrap_err();
+    assert!(err.contains("orchestrator"), "{err}");
+    // normal delegation still works
+    env.hub("send_message", json!({"from":"orchestrator","to":"mentor","text":"x","directory":"/tmp/p"})).unwrap();
+    let _ = std::fs::remove_dir_all(&env.0);
+}

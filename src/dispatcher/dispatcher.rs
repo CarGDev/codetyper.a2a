@@ -47,6 +47,20 @@ fn log(msg: &str) {
     println!("{} {msg}", now());
 }
 
+/// A delivery is given up after this many attempts.
+const MAX_ATTEMPTS: i64 = 5;
+
+/// Delay before attempt `attempt + 1` (attempt counts from 1): base, base*3, base*9, ... max 2 min.
+fn retry_delay_ms(attempt: i64, base_ms: u64) -> i64 {
+    (base_ms as i64).saturating_mul(3_i64.saturating_pow((attempt - 1).max(0) as u32)).min(120_000.max(base_ms as i64))
+}
+
+/// opencode answers POST prompt/agent with 404 (SessionNotFound | LocationNotFound) for a session
+/// whose folder is gone, while GET still works: a session is only usable if its folder exists.
+fn usable(info: &opencode::SessionInfo) -> bool {
+    info.directory.is_empty() || std::path::Path::new(&info.directory).is_dir()
+}
+
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }
@@ -59,6 +73,8 @@ struct Cfg {
     auto_open: bool,
     agent_dir: PathBuf,
     pid_file: PathBuf,
+    /// First retry delay for a failed delivery; grows x3 per attempt (see `retry_delay_ms`).
+    retry_base_ms: u64,
 }
 
 impl Cfg {
@@ -71,6 +87,7 @@ impl Cfg {
             auto_open: std::env::var("DISPATCH_AUTO_OPEN").as_deref() != Ok("0"),
             agent_dir: paths::agent_dir(),
             pid_file: paths::dispatcher_pid_path(),
+            retry_base_ms: paths::env_u64("DISPATCH_RETRY_BASE_MS", 5000),
         }
     }
 }
@@ -123,6 +140,7 @@ fn pid_is_dispatcher(pid: u32) -> bool {
 }
 
 fn release_lock(pid_file: &std::path::Path) {
+    unregister_self();
     let mine = std::fs::read_to_string(pid_file)
         .ok()
         .and_then(|t| t.trim().parse::<u32>().ok())
@@ -154,7 +172,8 @@ impl Dispatcher {
     fn agent_session(&self, agent: &str, dir: &str) -> R<Option<String>> {
         let rows = db::sessions(&self.conn, "WHERE agent = ? AND status = 'live' ORDER BY created_at DESC", &[agent])?;
         for r in rows.iter().filter(|r| r.directory == dir || same_project(dir, &r.directory)) {
-            if opencode::get(&r.session_id).is_some() {
+            let info = opencode::get(&r.session_id);
+            if info.as_ref().is_some_and(usable) {
                 return Ok(Some(r.session_id.clone()));
             }
             self.conn
@@ -163,7 +182,8 @@ impl Dispatcher {
                     params![r.agent, r.directory, r.session_id],
                 )
                 .map_err(e)?;
-            log(&format!("session {} for {agent} no longer exists; marked stale", r.session_id));
+            let why = if info.is_some() { "its folder no longer exists" } else { "it no longer exists" };
+            log(&format!("session {} for {agent}: {why}; marked stale", r.session_id));
         }
         Ok(None)
     }
@@ -172,19 +192,19 @@ impl Dispatcher {
     /// registered session, else the newest session open in the folder.
     fn requester_session(&self, t: &TaskRow, directory: Option<&str>) -> R<Option<String>> {
         if let Some(id) = t.from_session.as_deref().filter(|s| !s.is_empty()) {
-            if opencode::get(id).is_some() {
+            if opencode::get(id).as_ref().is_some_and(usable) {
                 return Ok(Some(id.to_string()));
             }
-            log(&format!("session {id} of task {} no longer exists", &t.id[..8]));
+            log(&format!("session {id} of task {} no longer exists or its folder is gone", &t.id[..8]));
         }
         let Some(dir) = directory else { return Ok(None) };
         if let Some(id) = self.agent_session(&t.from_agent, dir)? {
             return Ok(Some(id));
         }
-        let mut found = opencode::list(dir).into_iter().next();
+        let mut found = opencode::list(dir).into_iter().find(usable);
         if found.is_none() {
             if let Some(root) = project_root(dir).filter(|r| r != dir) {
-                found = opencode::list(&root).into_iter().next();
+                found = opencode::list(&root).into_iter().find(usable);
             }
         }
         Ok(found.map(|s| s.id))
@@ -194,6 +214,11 @@ impl Dispatcher {
     fn assignee_session(&mut self, agent: &str, dir: &str) -> Result<String, String> {
         if let Some(id) = self.agent_session(agent, dir)? {
             return Ok(id);
+        }
+        if agent == "orchestrator" {
+            // the orchestrator is the user's own session; results return to it, and the dispatcher
+            // must never open a second one
+            return Err(format!("no open orchestrator session in {dir}; open `oc` in that folder (the dispatcher never starts an orchestrator)"));
         }
         if !self.cfg.auto_open {
             return Err("opening sessions is disabled (DISPATCH_AUTO_OPEN=0)".into());
@@ -476,6 +501,18 @@ impl Dispatcher {
         if kind == "requester" {
             self.settle_usage(t);
         }
+        if let (true, Some(d)) = (kind == "assignee", directory) {
+            if !std::path::Path::new(d).is_dir() {
+                self.event(t, "directory_missing", target, d);
+                self.finish_nudge(&key, "dead", 0, Some("directory missing"));
+                log(&format!("task {}: folder {d} does not exist; failing it", &t.id[..8]));
+                return self.post_system_message(
+                    t,
+                    "failed",
+                    &format!("directory_missing: {d} does not exist (was the project moved?). Send the task again with the new folder."),
+                );
+            }
+        }
         let session: Result<String, String> = if kind == "assignee" {
             match directory {
                 None => Err("the task has no folder".into()),
@@ -535,9 +572,37 @@ impl Dispatcher {
                 self.finish_nudge(&key, "pending", 0, Some("session busy")); // retry next tick
             }
             Err(err) => {
-                self.event(t, "nudge_released", target, "error");
-                log(&format!("prompt failed: {}", first_line(&err)));
-                self.finish_nudge(&key, "pending", 5_000, Some(&first_line(&err)));
+                let attempt: i64 =
+                    self.conn.query_row("SELECT attempts FROM nudges WHERE key = ?", [&key], |r| r.get(0)).unwrap_or(1);
+                let why = first_line(&err).to_string();
+                log(&format!(
+                    "prompt failed (task {}, session {session}, attempt {attempt}/{MAX_ATTEMPTS}): {why}",
+                    &t.id[..8]
+                ));
+                // 404 = the session may be unusable (folder gone): retire it once, so the next try
+                // gets a fresh one; if that 404s too the cause is not the session, so back off
+                let gone = why.contains("404") && attempt == 1;
+                if gone {
+                    let _ = self.conn.execute("UPDATE sessions SET status='stale' WHERE session_id = ?", [&session]);
+                }
+                if attempt >= MAX_ATTEMPTS {
+                    self.event(t, "nudge_dead", target, &why);
+                    self.finish_nudge(&key, "dead", 0, Some(&why));
+                    if kind == "assignee" {
+                        log(&format!("giving up on {target} for task {}", &t.id[..8]));
+                        self.post_system_message(
+                            t,
+                            "input-required",
+                            &format!("delivery_failed: could not hand the task to \"{target}\" after {MAX_ATTEMPTS} attempts ({why}). Fix that, then reply on this task to retry."),
+                        )?;
+                    } else {
+                        log(&format!("giving up waking {target} for task {}; the result stays in the hub", &t.id[..8]));
+                    }
+                } else {
+                    self.event(t, "nudge_released", target, "error");
+                    let wait = if gone { 0 } else { retry_delay_ms(attempt, self.cfg.retry_base_ms) };
+                    self.finish_nudge(&key, "pending", wait, Some(&why));
+                }
             }
         }
         Ok(())
@@ -701,6 +766,24 @@ fn iso_after_ms(ms: i64) -> String {
     (chrono::Utc::now() + chrono::Duration::milliseconds(ms)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+
+    #[test]
+    fn retries_back_off_and_are_capped() {
+        let d: Vec<i64> = (1..=5).map(|a| retry_delay_ms(a, 5000)).collect();
+        assert_eq!(d, vec![5000, 15000, 45000, 120000, 120000]);
+        assert_eq!(retry_delay_ms(1, 50), 50);
+    }
+
+    #[test]
+    fn versions_compare_and_unknown_is_oldest() {
+        assert!(is_older("", "1.3.0") && is_older("1.2.9", "1.3.0") && is_older("1.3.0", "1.10.0"));
+        assert!(!is_older("1.3.0", "1.3.0") && !is_older("2.0.0", "1.3.0"));
+    }
+}
+
 fn status_message_id(t: &TaskRow) -> String {
     serde_json::from_str::<Value>(t.status_message.as_deref().unwrap_or("{}"))
         .ok()
@@ -734,9 +817,113 @@ fn nudge_text(kind: &str, t: &TaskRow) -> String {
 /// Make sure a dispatcher is running, starting one detached (own process group, logging to a
 /// file) rather than opening another window or pane. `Some(pid)` = started now, `None` = was
 /// already running. Used by the hub (so opencode alone is enough) and by `oc`.
+/// Registry of running dispatchers: one file per pid in `<pidfile>.d/`, content = the version of
+/// the binary. The pidfile alone cannot tell a stale old-version dispatcher from the current one,
+/// and old ones used to survive upgrades (and fail on the new schema).
+fn registry_dir() -> PathBuf {
+    let mut p = paths::dispatcher_pid_path().into_os_string();
+    p.push(".d");
+    PathBuf::from(p)
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn register_self() {
+    let dir = registry_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(std::process::id().to_string()), VERSION);
+}
+
+fn unregister_self() {
+    let _ = std::fs::remove_file(registry_dir().join(std::process::id().to_string()));
+}
+
+/// Live registered dispatchers as (pid, version); entries of dead processes are removed.
+pub fn registered() -> Vec<(u32, String)> {
+    let Ok(rd) = std::fs::read_dir(registry_dir()) else { return vec![] };
+    let mut out = vec![];
+    for entry in rd.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        if pid_is_dispatcher(pid) {
+            out.push((pid, std::fs::read_to_string(entry.path()).unwrap_or_default().trim().to_string()));
+        } else {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    out
+}
+
+/// "1.3.0" -> (1,3,0); anything unparsable sorts as the oldest.
+fn version_key(v: &str) -> (u64, u64, u64) {
+    let mut it = v.trim().split('.').map(|p| p.split(['-', '+']).next().unwrap_or("").parse::<u64>().unwrap_or(0));
+    (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
+}
+
+/// True when `v` is a known version older than `than` (unknown/empty counts as older: only
+/// dispatchers from before the registry existed lack one).
+fn is_older(v: &str, than: &str) -> bool {
+    v.trim().is_empty() || version_key(v) < version_key(than)
+}
+
+/// TERM `pid` and wait up to `wait_ms` for it to go away.
+fn terminate(pid: u32, wait_ms: u64) -> bool {
+    sys::kill_term(pid);
+    let end = std::time::Instant::now() + Duration::from_millis(wait_ms);
+    while sys::pid_alive(pid) {
+        if std::time::Instant::now() > end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// Dispatchers from before the registry existed are not registered, so they can only be found by
+/// name. Only done for the default database: a sandbox (A2A_DB set) must never touch other processes.
+pub fn sweep_unregistered() {
+    if std::env::var_os("A2A_DB").is_none() {
+        let _ = std::process::Command::new("pkill").args(["-f", "codetypera2a dispatcher"]).status();
+    }
+}
+
+/// `oc stop`: end every dispatcher of this database (registered ones and the pidfile owner).
+/// Returns how many were signalled.
+pub fn stop_all() -> usize {
+    let mut pids: Vec<u32> = registered().into_iter().map(|(p, _)| p).collect();
+    if let Some(p) = sys::dispatcher_pid(&paths::dispatcher_pid_path()) {
+        if !pids.contains(&p) {
+            pids.push(p);
+        }
+    }
+    for p in &pids {
+        terminate(*p, 3000);
+    }
+    let _ = std::fs::remove_file(paths::dispatcher_pid_path());
+    pids.len()
+}
+
 pub fn ensure_running() -> Result<Option<u32>, String> {
-    if sys::dispatcher_pid(&paths::dispatcher_pid_path()).is_some() {
-        return Ok(None);
+    let pid_file = paths::dispatcher_pid_path();
+    let regs = registered();
+    if let Some(pid) = sys::dispatcher_pid(&pid_file) {
+        let ver = regs.iter().find(|(p, _)| *p == pid).map(|(_, v)| v.as_str()).unwrap_or("");
+        if !is_older(ver, VERSION) {
+            // current (or newer than this binary: never replace it) -> keep it, end any duplicates
+            for (p, _) in regs.iter().filter(|(p, _)| *p != pid) {
+                terminate(*p, 3000);
+            }
+            return Ok(None);
+        }
+        log(&format!("replacing dispatcher pid {pid} (version {}) with {VERSION}", if ver.is_empty() { "unknown" } else { ver }));
+        terminate(pid, 3000);
+        let _ = std::fs::remove_file(&pid_file);
+        if ver.is_empty() {
+            sweep_unregistered(); // an old build: its siblings are old too
+        }
+    }
+    // nobody owns the pidfile: registered strays must not keep running next to the new one
+    for (p, _) in registered() {
+        terminate(p, 3000);
     }
     let exe = std::env::current_exe().map_err(e)?;
     sys::spawn_detached(&exe, &["dispatcher"], &log_path()).map(Some).map_err(e)
@@ -769,6 +956,7 @@ pub fn run() -> i32 {
             return 1;
         }
     }
+    register_self();
     let pf = pid_file.clone();
     let _ = ctrlc::set_handler(move || {
         release_lock(&pf);

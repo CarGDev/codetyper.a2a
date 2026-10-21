@@ -222,6 +222,11 @@ pub fn switch_agent(id: &str, agent: &str) -> Result<(), String> {
     sys::api(&bin(), "post", &format!("/api/session/{id}/agent"), Some(&json!({ "agent": agent }))).map(|_| ())
 }
 
+/// Stop the turn a session is running right now.
+pub fn interrupt(id: &str) -> Result<(), String> {
+    sys::api(&bin(), "post", &format!("/api/session/{id}/interrupt"), None).map(|_| ())
+}
+
 pub fn prompt(id: &str, text: &str) -> Result<(), String> {
     sys::api(&bin(), "post", &format!("/api/session/{id}/prompt"), Some(&json!({ "text": text, "delivery": "queue" }))).map(|_| ())
 }
