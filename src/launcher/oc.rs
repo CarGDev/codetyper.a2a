@@ -117,7 +117,7 @@ fn watch() -> i32 {
 /// Same rule as the dispatcher: agent-to-agent nudges against DISPATCH_MAX_HOPS * (1 + grants).
 fn hop_capped(d: &rusqlite::Connection, ctx: &str, max_hops: i64) -> bool {
     let n: i64 = d
-        .query_row("SELECT COUNT(*) FROM nudges WHERE context_id = ? AND kind IN ('assignee','requester')", [ctx], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM nudges WHERE context_id = ? AND kind IN ('assignee','requester') AND status IN ('claimed','delivered')", [ctx], |r| r.get(0))
         .unwrap_or(0);
     let grants: i64 = d.query_row("SELECT grants FROM hop_allow WHERE context_id = ?", [ctx], |r| r.get(0)).unwrap_or(0);
     n >= max_hops * (1 + grants)
@@ -206,8 +206,9 @@ pub fn run(args: &[String]) -> i32 {
             let Some(ctx) = arg else { die("usage: oc continue <contextId>") };
             let max_hops = paths::env_u64("DISPATCH_MAX_HOPS", 40) as i64;
             let d = ok(db::open(&paths::db_path()));
+            ok(db::ensure_context(&d, ctx).map_err(|e| e.to_string()));
             ok(d.execute(
-                "INSERT INTO hop_allow (context_id, grants) VALUES (?, 1) ON CONFLICT(context_id) DO UPDATE SET grants = grants + 1",
+                "INSERT INTO hop_allow (context_id, grants, updated_at) VALUES (?, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(context_id) DO UPDATE SET grants = grants + 1, updated_at = excluded.updated_at",
                 [ctx],
             )
             .map_err(|e| e.to_string()));

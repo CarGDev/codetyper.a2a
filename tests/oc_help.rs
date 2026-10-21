@@ -40,6 +40,11 @@ fn oc_status_shows_context_and_flags_hop_capped_contexts() {
     // first run creates the schema
     let _ = run(&["oc", "status"], &dir);
     let db = rusqlite::Connection::open(dir.join("hub.db")).unwrap();
+    db.execute_batch(
+        "INSERT OR IGNORE INTO agents (name, card, created_at, updated_at) VALUES ('orchestrator','{}','t','t'), ('build','{}','t','t');
+         INSERT INTO contexts (id, created_at, updated_at) VALUES ('ctx-x','t','t');",
+    )
+    .unwrap();
     db.execute(
         "INSERT INTO tasks (id, context_id, from_agent, to_agent, state, history, artifacts, created_at, updated_at)
          VALUES ('abcdef1234567890', 'ctx-x', 'orchestrator', 'build', 'input-required', '[]', '[]', 'now', 'now')",
@@ -51,7 +56,7 @@ fn oc_status_shows_context_and_flags_hop_capped_contexts() {
     assert!(text.contains("ctx=ctx-x") && !text.contains("HOP-CAPPED"), "{text}");
     for i in 0..40 {
         db.execute(
-            "INSERT INTO nudges (key, task_id, context_id, target, kind, created_at) VALUES (?, 'abcdef1234567890', 'ctx-x', 't', 'assignee', 'now')",
+            "INSERT INTO nudges (key, task_id, context_id, target, kind, status, created_at, updated_at) VALUES (?, 'abcdef1234567890', 'ctx-x', 't', 'assignee', 'delivered', 'now', 'now')",
             [format!("k{i}")],
         )
         .unwrap();

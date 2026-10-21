@@ -263,7 +263,7 @@ Launch independent subagent tasks with `background: true` so they run in a secon
 
 **Agent-to-agent communication** goes through the `a2a` hub (tools `a2a_inbox`, `a2a_send_message`, `a2a_update_task`, `a2a_get_task`, `a2a_list_agents`, ...). Your agent name is `react-frontend-expert`. Full guide: `~/.config/opencode/a2a/PROTOCOL.md`.
 - Always pass `directory:"<your cwd>"` to `a2a_inbox` and `a2a_send_message` so you only see and create tasks for your own project.
-- Start of work: `a2a_inbox {agent:"react-frontend-expert"}`. If a task is for you, claim it with `a2a_update_task {state:"working"}`.
+- Start of work: `a2a_inbox {agent:"react-frontend-expert"}`. If a task is for you, claim it with `a2a_claim_task {id, agent}` (atomic: if it fails, someone else has the task, so stop and do not work on it), then report progress with `a2a_update_task`.
 - Need another agent: `a2a_send_message {from:"react-frontend-expert", to:"<agent>", text, contextId, directory:"<your cwd>"}`, then check `a2a_inbox {agent:"react-frontend-expert", as:"requester"}` for the result.
 - Finish: `a2a_update_task {state:"completed"|"failed"|"input-required", text, artifact:{name, text}}`; put the deliverable in the artifact.
 - If the `a2a_*` tools are unavailable, use the file-mailbox fallback in PROTOCOL.md and say so.

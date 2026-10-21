@@ -23,8 +23,9 @@ impl Env {
         std::fs::write(
             &stub,
             format!(
-                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2 $3\" in\n  \"get /api/session/active\") echo '{{\"data\":{{}}}}';;\n  \"get /api/session/orch1\") echo '{{\"data\":{{\"id\":\"orch1\",\"agent\":\"orchestrator\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}';;\n  \"get /api/session/ses_m1\") echo '{{\"data\":{{\"id\":\"ses_m1\",\"agent\":\"mentor\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}';;\n  \"get /api/agent\"*) echo '{{\"data\":[{{\"id\":\"mentor\",\"description\":\"m\",\"mode\":\"primary\",\"hidden\":false,\"model\":{{\"id\":\"claude-haiku-5.5\",\"providerID\":\"github-copilot\",\"variant\":\"high\"}}}}]}}';;\n  \"post /api/session\") echo '{{\"data\":{{\"id\":\"ses_m1\"}}}}';;\nesac\n",
-                log = dir.join("calls.log").display()
+                "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2 $3\" in\n  \"get /api/session/active\") echo '{{\"data\":{{}}}}';;\n  \"get /api/session/orch1\") echo '{{\"data\":{{\"id\":\"orch1\",\"agent\":\"orchestrator\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}';;\n  \"get /api/session/ses_m1\") if [ -f {dir}/ses_m1.json ]; then cat {dir}/ses_m1.json; else echo '{{\"data\":{{\"id\":\"ses_m1\",\"agent\":\"mentor\",\"location\":{{\"directory\":\"/tmp/projx\"}},\"time\":{{\"created\":1,\"updated\":2}}}}}}'; fi;;\n  \"get /api/agent\"*) echo '{{\"data\":[{{\"id\":\"mentor\",\"description\":\"m\",\"mode\":\"primary\",\"hidden\":false,\"model\":{{\"id\":\"claude-haiku-5.5\",\"providerID\":\"github-copilot\",\"variant\":\"high\"}}}}]}}';;\n  \"post /api/session\") echo '{{\"data\":{{\"id\":\"ses_m1\"}}}}';;\nesac\n",
+                log = dir.join("calls.log").display(),
+                dir = dir.display()
             ),
         )
         .unwrap();
@@ -127,5 +128,54 @@ fn a_new_agent_session_gets_the_model_chosen_for_that_agent() {
         "session create must carry the agent's model: {create}"
     );
     stop(d);
+    let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+fn session_json(input: i64, output: i64, cache_read: i64, cost: f64) -> String {
+    json!({"data":{"id":"ses_m1","agent":"mentor","location":{"directory":"/tmp/projx"},"time":{"created":1,"updated":2},
+        "model":{"id":"claude-haiku-5.5","providerID":"github-copilot"},"cost":cost,
+        "tokens":{"input":input,"output":output,"reasoning":0,"cache":{"read":cache_read,"write":0}}}})
+    .to_string()
+}
+
+fn events(env: &Env, sql: &str) -> Vec<(Option<i64>, Option<i64>, Option<f64>)> {
+    let c = rusqlite::Connection::open(env.dir.join("hub.db")).unwrap();
+    let mut st = c.prepare(sql).unwrap();
+    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().flatten().collect()
+}
+
+#[test]
+fn what_an_agent_spends_on_a_task_is_recorded_and_priced() {
+    let env = Env::new("usage");
+    // the mentor session already spent tokens on earlier work: only the delta belongs to this task
+    std::fs::write(env.dir.join("ses_m1.json"), session_json(10_000, 500, 0, 0.0)).unwrap();
+    let d = env.dispatcher("u.pid");
+    let task = env.hub("send_message", json!({"from":"orchestrator","to":"mentor","text":"hi","directory":"/tmp/projx","sessionId":"orch1"}));
+    let id = task["id"].as_str().unwrap().to_string();
+    let base = "SELECT tokens_in, tokens_out, cost_usd FROM events WHERE kind = 'usage_baseline'";
+    for _ in 0..50 {
+        if !events(&env, base).is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(events(&env, base).len(), 1, "a baseline is taken when the task is handed over");
+    // the mentor works, then reports
+    std::fs::write(env.dir.join("ses_m1.json"), session_json(1_010_000, 1_000_500, 0, 0.0)).unwrap();
+    env.hub("update_task", json!({"id": id, "agent":"mentor", "state":"completed", "text":"done"}));
+    let sql = "SELECT tokens_in, tokens_out, cost_usd FROM events WHERE kind = 'usage'";
+    for _ in 0..50 {
+        if !events(&env, sql).is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    stop(d);
+    let got = events(&env, sql);
+    assert_eq!(got.len(), 1, "{got:?}");
+    let (tin, tout, cost) = got[0];
+    assert_eq!((tin, tout), (Some(1_000_000), Some(1_000_000)), "only the delta since the baseline");
+    // claude-haiku-5.5 is $0.10 in / $0.50 out per 1M tokens and opencode charged 0: estimated
+    assert!((cost.unwrap() - 0.60).abs() < 1e-6, "{cost:?}");
     let _ = std::fs::remove_dir_all(&env.dir);
 }

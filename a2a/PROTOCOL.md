@@ -16,7 +16,8 @@ opencode window.
 | `send_message`            | no `taskId`: create a Task for `to` (or `any`). With `taskId`: reply on it                   |
 | `inbox`                   | `as:"assignee"` (default): work waiting for you. `as:"requester"`: updates on tasks you sent |
 | `get_task` / `list_tasks` | read a task (status, history, artifacts) / filter by contextId, state, from, to              |
-| `update_task`             | assignee only: claim, ask a question, finish, attach an artifact                             |
+| `claim_task`              | take a task before working on it; atomic (one winner). Required for tasks sent to `any`      |
+| `update_task`             | assignee only: ask a question, finish, attach an artifact; optional `expectedVersion`        |
 | `cancel_task`             | requester or assignee                                                                        |
 
 ## Task lifecycle
@@ -29,7 +30,8 @@ new task with `referenceTaskIds`. A requester reply on an `input-required` task 
 ## Conventions
 
 - Your agent name = your agent file name (`orchestrator`, `mentor`, ...). Always pass it as `agent`/`from`.
-- **Start of work:** `inbox {agent, directory}`. If a task is for you: `update_task {state:"working"}`.
+- **Start of work:** `inbox {agent, directory}`. If a task is for you: `claim_task {id, agent}`. If it fails, someone else has the task: stop, do not work on it
+  (several agents may see the same `any` task; only the claim winner may update it).
 - **Delegate:** `send_message {from, to, text, contextId, directory}`; keep the returned `id`, then END YOUR TURN.
   Results arrive as an `A2A:` prompt in the same session.
 - **Finish:** `update_task {state:"completed"|"failed"|"input-required", text, artifact:{name, text|data|url}}`.

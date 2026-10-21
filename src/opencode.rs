@@ -86,6 +86,100 @@ fn parse_info(v: &Value) -> Option<SessionInfo> {
     })
 }
 
+/// Cumulative token use and cost of one session, as opencode reports it (`tokens`, `cost`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Usage {
+    pub input: i64,
+    pub output: i64,
+    pub reasoning: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+    /// What opencode charged; 0 on subscription providers.
+    pub cost: f64,
+    /// `provider/model` of the session.
+    pub model: Option<String>,
+}
+
+impl Usage {
+    /// What was used between `prev` and `self` (counters only grow; a reset counts from zero).
+    pub fn since(&self, prev: &Usage) -> Usage {
+        let d = |a: i64, b: i64| if a >= b { a - b } else { a };
+        Usage {
+            input: d(self.input, prev.input),
+            output: d(self.output, prev.output),
+            reasoning: d(self.reasoning, prev.reasoning),
+            cache_read: d(self.cache_read, prev.cache_read),
+            cache_write: d(self.cache_write, prev.cache_write),
+            cost: if self.cost >= prev.cost { self.cost - prev.cost } else { self.cost },
+            model: self.model.clone(),
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.input + self.output + self.reasoning + self.cache_read + self.cache_write == 0
+    }
+
+    /// USD: opencode's own figure when it charges, else an estimate from the published price table
+    /// (cache reads at 10% of the input price, cache writes at the input price). The bool says
+    /// whether it is an estimate. None when the model has no known price.
+    pub fn cost_usd(&self) -> Option<(f64, bool)> {
+        if self.cost > 0.0 {
+            return Some((self.cost, false));
+        }
+        let (pin, pout) = crate::models::price(self.model.as_deref()?)?;
+        let usd = (self.input as f64 * pin
+            + self.cache_write as f64 * pin
+            + self.cache_read as f64 * pin * 0.1
+            + (self.output + self.reasoning) as f64 * pout)
+            / 1_000_000.0;
+        Some((usd, true))
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({ "input": self.input, "output": self.output, "reasoning": self.reasoning,
+                "cache_read": self.cache_read, "cache_write": self.cache_write, "cost": self.cost })
+    }
+
+    pub fn from_json(v: &Value, model: Option<String>) -> Usage {
+        let n = |k: &str| v[k].as_i64().unwrap_or(0);
+        Usage {
+            input: n("input"),
+            output: n("output"),
+            reasoning: n("reasoning"),
+            cache_read: n("cache_read"),
+            cache_write: n("cache_write"),
+            cost: v["cost"].as_f64().unwrap_or(0.0),
+            model,
+        }
+    }
+}
+
+/// `{"tokens":{input,output,reasoning,cache:{read,write}},"cost":..,"model":{id,providerID}}`
+pub fn parse_usage(v: &Value) -> Option<Usage> {
+    let t = v.get("tokens").filter(|t| t.is_object())?;
+    let n = |x: &Value| x.as_i64().unwrap_or(0);
+    let model = match (v["model"]["providerID"].as_str(), v["model"]["id"].as_str()) {
+        (Some(p), Some(m)) => Some(format!("{p}/{m}")),
+        (None, Some(m)) => Some(m.to_string()),
+        _ => None,
+    };
+    Some(Usage {
+        input: n(&t["input"]),
+        output: n(&t["output"]),
+        reasoning: n(&t["reasoning"]),
+        cache_read: n(&t["cache"]["read"]),
+        cache_write: n(&t["cache"]["write"]),
+        cost: v["cost"].as_f64().unwrap_or(0.0),
+        model,
+    })
+}
+
+/// Cumulative usage of a session; None when opencode does not report it.
+pub fn usage(id: &str) -> Option<Usage> {
+    let r = sys::api(&bin(), "get", &format!("/api/session/{id}"), None).ok()?;
+    parse_usage(&r["data"])
+}
+
 /// Ids of sessions currently running a turn.
 pub fn active_ids() -> Result<HashSet<String>, String> {
     let r = sys::api(&bin(), "get", "/api/session/active", None)?;
@@ -158,4 +252,33 @@ pub fn models() -> Result<Vec<String>, String> {
         return Err("`opencode models` listed no models".into());
     }
     Ok(v)
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_session_totals_and_diffs_them() {
+        let v = json!({"cost":0,"model":{"id":"claude-haiku-5.5","providerID":"github-copilot"},
+            "tokens":{"input":1000,"output":200,"reasoning":50,"cache":{"read":4000,"write":10}}});
+        let a = parse_usage(&v).unwrap();
+        assert_eq!((a.input, a.output, a.reasoning, a.cache_read, a.cache_write), (1000, 200, 50, 4000, 10));
+        assert_eq!(a.model.as_deref(), Some("github-copilot/claude-haiku-5.5"));
+        let b = Usage { input: 1500, output: 260, ..a.clone() };
+        let d = b.since(&a);
+        assert_eq!((d.input, d.output, d.cache_read), (500, 60, 0));
+        assert!(parse_usage(&json!({"id":"x"})).is_none());
+    }
+
+    #[test]
+    fn cost_uses_opencode_when_it_charges_else_the_price_table() {
+        let mut u = Usage { input: 1_000_000, output: 1_000_000, model: Some("github-copilot/claude-haiku-5.5".into()), ..Default::default() };
+        let (usd, est) = u.cost_usd().unwrap();
+        assert!(est && (usd - 0.60).abs() < 1e-9, "{usd}"); // $0.10 in + $0.50 out
+        u.cost = 0.25;
+        assert_eq!(u.cost_usd(), Some((0.25, false)));
+        let unknown = Usage { input: 5, model: Some("x/unknown".into()), ..Default::default() };
+        assert_eq!(unknown.cost_usd(), None);
+    }
 }

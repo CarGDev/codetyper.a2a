@@ -209,10 +209,11 @@ impl Dispatcher {
         self.conn
             .execute("UPDATE sessions SET status='stale' WHERE agent=? AND directory=?", params![agent, root])
             .map_err(e)?;
+        db::ensure_agent(&self.conn, agent).map_err(e)?;
         self.conn
             .execute(
-                "INSERT INTO sessions (agent, directory, session_id, tmux_target, created_at) VALUES (?,?,?,?,?)",
-                params![agent, root, r, Option::<String>::None, now()],
+                "INSERT INTO sessions (agent, directory, session_id, tmux_target, created_at, last_seen_at) VALUES (?,?,?,?,?,?)",
+                params![agent, root, r, Option::<String>::None, now(), now()],
             )
             .map_err(e)?;
         log(&format!("opened session {r} for {agent} in {root}"));
@@ -278,7 +279,7 @@ impl Dispatcher {
     fn hops(&self, context_id: &str) -> R<i64> {
         self.conn
             .query_row(
-                "SELECT COUNT(*) FROM nudges WHERE context_id = ? AND kind IN ('assignee','requester')",
+                "SELECT COUNT(*) FROM nudges WHERE context_id = ? AND kind IN ('assignee','requester') AND status IN ('claimed','delivered')",
                 [context_id],
                 |r| r.get(0),
             )
@@ -304,7 +305,7 @@ impl Dispatcher {
         }
         self.conn
             .execute(
-                "INSERT INTO hop_allow (context_id, notified_level) VALUES (?, ?) ON CONFLICT(context_id) DO UPDATE SET notified_level = excluded.notified_level",
+                "INSERT INTO hop_allow (context_id, notified_level, updated_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(context_id) DO UPDATE SET notified_level = excluded.notified_level, updated_at = excluded.updated_at",
                 params![t.context_id, allowed],
             )
             .map_err(e)?;
@@ -362,7 +363,7 @@ impl Dispatcher {
             }
             self.conn
                 .execute(
-                    "UPDATE hop_allow SET grants = grants + 1, last_continue_msg = ? WHERE context_id = ?",
+                    "UPDATE hop_allow SET grants = grants + 1, last_continue_msg = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE context_id = ?",
                     params![msg_id, t.context_id],
                 )
                 .map_err(e)?;
@@ -384,8 +385,8 @@ impl Dispatcher {
         history.as_array_mut().map(|h| h.push(msg.clone()));
         self.conn
             .execute(
-                "UPDATE tasks SET state=?, status_message=?, history=?, updated_at=? WHERE id=?",
-                params![state, msg.to_string(), history.to_string(), now(), t.id],
+                "UPDATE tasks SET state=?, status_message=?, history=?, updated_at=?, version=version+1, completed_at=CASE WHEN ? IN ('completed','failed','canceled','rejected') THEN ? END WHERE id=?",
+                params![state, msg.to_string(), history.to_string(), now(), state, now(), t.id],
             )
             .map_err(e)?;
         self.event(t, "state_change", "dispatcher", state);
@@ -397,26 +398,57 @@ impl Dispatcher {
     }
 
     /// Claim (task, status message, kind) in the shared database. `true` = we own it. The insert is
-    /// atomic, so even two dispatchers cannot both deliver the same nudge.
+    /// atomic, so even two dispatchers cannot both deliver the same nudge. A released nudge
+    /// (`pending`, due) or one whose claimant died (`claimed`, lease expired) can be claimed again.
     fn insert_nudge(&self, key: &str, t: &TaskRow, target: &str, kind: &str) -> R<bool> {
+        let (ts, lease) = (now(), iso_after_ms(NUDGE_LEASE_MS));
+        let owner = format!("dispatcher-{}", std::process::id());
+        db::ensure_context(&self.conn, &t.context_id).map_err(e)?;
         let n = self
             .conn
             .execute(
-                "INSERT OR IGNORE INTO nudges (key, task_id, context_id, target, kind, created_at) VALUES (?,?,?,?,?,?)",
-                params![key, t.id, t.context_id, target, kind, now()],
+                "INSERT OR IGNORE INTO nudges (key, task_id, context_id, target, kind, status, attempts, claimed_by, claim_expires_at, created_at, updated_at) VALUES (?,?,?,?,?,'claimed',1,?,?,?,?)",
+                params![key, t.id, t.context_id, target, kind, owner, lease, ts, ts],
+            )
+            .map_err(e)?;
+        if n == 1 {
+            return Ok(true);
+        }
+        let n = self
+            .conn
+            .execute(
+                "UPDATE nudges SET status='claimed', attempts=attempts+1, claimed_by=?, claim_expires_at=?, updated_at=?
+                 WHERE key=? AND ((status='pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR (status='claimed' AND claim_expires_at < ?))",
+                params![owner, lease, ts, key, ts, ts],
             )
             .map_err(e)?;
         Ok(n == 1)
     }
 
-    /// Give a claim back (nothing was delivered), so a later tick tries again.
-    fn release_nudge(&self, key: &str) {
-        let _ = self.conn.execute("DELETE FROM nudges WHERE key = ?", [key]);
+    /// Move a claimed nudge to its outcome: `delivered`, `dead` (nothing to deliver to) or `pending`
+    /// (try again in `retry_in_ms`, with the reason in `last_error`).
+    fn finish_nudge(&self, key: &str, status: &str, retry_in_ms: i64, err: Option<&str>) {
+        let ts = now();
+        let _ = self.conn.execute(
+            "UPDATE nudges SET status=?, updated_at=?, delivered_at=CASE WHEN ?='delivered' THEN ? END, next_attempt_at=CASE WHEN ?='pending' THEN ? END, last_error=?, claimed_by=NULL, claim_expires_at=NULL WHERE key=?",
+            params![status, ts, status, ts, status, iso_after_ms(retry_in_ms), err, key],
+        );
+    }
+
+    /// True while the nudge must not be touched: delivered, dead, or claimed with a live lease or
+    /// released but not yet due.
+    fn nudge_busy(&self, key: &str) -> bool {
+        let ts = now();
+        db::exists(
+            &self.conn,
+            "SELECT 1 FROM nudges WHERE key = ? AND NOT ((status='pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) OR (status='claimed' AND claim_expires_at < ?))",
+            &[key, &ts, &ts],
+        )
     }
 
     fn nudge(&mut self, t: &TaskRow, kind: &str, target: &str, directory: Option<&str>) -> R<()> {
         let key = format!("{}:{}:{kind}", t.id, status_message_id(t));
-        if db::exists(&self.conn, "SELECT 1 FROM nudges WHERE key = ?", &[&key]) {
+        if self.nudge_busy(&key) {
             return Ok(());
         }
         let (n, allowed) = (self.hops(&t.context_id)?, self.allowed_hops(&t.context_id));
@@ -427,6 +459,7 @@ impl Dispatcher {
             if !self.insert_nudge(&key, t, target, "no-agent")? {
                 return Ok(()); // another dispatcher already handled it
             }
+            self.finish_nudge(&key, "dead", 0, Some("no agent"));
             self.event(t, "no_agent", target, target);
             log(&format!("task {}: no agent file for \"{target}\"; failing it", &t.id[..8]));
             return self.post_system_message(
@@ -440,6 +473,9 @@ impl Dispatcher {
             return Ok(());
         }
         self.event(t, "nudge_claimed", target, kind);
+        if kind == "requester" {
+            self.settle_usage(t);
+        }
         let session: Result<String, String> = if kind == "assignee" {
             match directory {
                 None => Err("the task has no folder".into()),
@@ -447,6 +483,7 @@ impl Dispatcher {
                     Some(id) => Ok(id),
                     None => {
                         log(&format!("[dry] would open a new session for {target} in {d}"));
+                        self.finish_nudge(&key, "delivered", 0, None);
                         return Ok(());
                     }
                 },
@@ -460,6 +497,7 @@ impl Dispatcher {
             Err(why) => {
                 self.event(t, "no_session", target, &why);
                 let _ = self.conn.execute("UPDATE nudges SET kind = 'no-session' WHERE key = ?", [&key]);
+                self.finish_nudge(&key, "dead", 0, Some(&why));
                 if kind == "assignee" {
                     let in_dir = directory.map(|d| format!(" in {d}")).unwrap_or_default();
                     log(&format!("no session for {target}{in_dir} ({why}); telling requester {}", t.from_agent));
@@ -477,10 +515,15 @@ impl Dispatcher {
         let text = nudge_text(kind, t);
         if self.cfg.dry {
             log(&format!("[dry] nudge {kind} -> {target} (session {session}) task {} state {}", &t.id[..8], t.state));
+            self.finish_nudge(&key, "delivered", 0, None);
             return Ok(());
         }
         match self.deliver(&session, target, &text) {
             Ok(true) => {
+                self.finish_nudge(&key, "delivered", 0, None);
+                if kind == "assignee" {
+                    self.usage_baseline(t, target, &session);
+                }
                 self.event(t, "nudge_delivered", target, kind);
                 log(&format!("nudge {kind} -> {target} (session {session}) task {} state {}", &t.id[..8], t.state));
                 if let (true, Some(d)) = (kind == "assignee", directory) {
@@ -489,15 +532,61 @@ impl Dispatcher {
             }
             Ok(false) => {
                 self.event(t, "nudge_released", target, "busy");
-                self.release_nudge(&key); // session busy: retry next tick
+                self.finish_nudge(&key, "pending", 0, Some("session busy")); // retry next tick
             }
             Err(err) => {
                 self.event(t, "nudge_released", target, "error");
                 log(&format!("prompt failed: {}", first_line(&err)));
-                self.release_nudge(&key);
+                self.finish_nudge(&key, "pending", 5_000, Some(&first_line(&err)));
             }
         }
         Ok(())
+    }
+
+    /// Remember the assignee session's cumulative usage when it is handed the task, so what it
+    /// spends on the task can be told apart from what the (reused) session spent before.
+    fn usage_baseline(&self, t: &TaskRow, agent: &str, session: &str) {
+        let Some(u) = opencode::usage(session) else { return };
+        let detail = json!({ "session": session, "cum": u.to_json(), "model": u.model }).to_string();
+        db::record_event(&self.conn, Some(&t.id), Some(&t.context_id), "usage_baseline", Some(agent), Some(&detail));
+    }
+
+    /// Before the requester is woken: record what the assignee's session spent on this task since
+    /// the last baseline/usage event, as one `usage` event (tokens, and cost when it can be known).
+    /// Best effort: never fails a tick.
+    fn settle_usage(&self, t: &TaskRow) {
+        let prev: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT detail FROM events WHERE task_id = ? AND kind IN ('usage_baseline','usage') ORDER BY id DESC LIMIT 1",
+                [&t.id],
+                |r| r.get(0),
+            )
+            .ok();
+        let Some(prev) = prev.and_then(|d| serde_json::from_str::<Value>(&d).ok()) else { return };
+        let Some(session) = prev["session"].as_str() else { return };
+        let Some(cur) = opencode::usage(session) else { return };
+        let delta = cur.since(&opencode::Usage::from_json(&prev["cum"], None));
+        if delta.is_zero() && delta.cost == 0.0 {
+            return;
+        }
+        let cost = delta.cost_usd();
+        let detail = json!({
+            "session": session, "cum": cur.to_json(), "delta": delta.to_json(), "model": cur.model,
+            "cost_source": cost.map(|(_, est)| if est { "estimate" } else { "opencode" }),
+        })
+        .to_string();
+        // cached input counts as input; reasoning counts as output
+        db::record_usage(
+            &self.conn,
+            &t.id,
+            &t.context_id,
+            &t.to_agent,
+            delta.input + delta.cache_read + delta.cache_write,
+            delta.output + delta.reasoning,
+            cost.map(|(c, _)| c),
+            &detail,
+        );
     }
 
     fn tick(&mut self) -> R<()> {
@@ -561,7 +650,10 @@ impl Dispatcher {
             let retried = db::exists(&self.conn, "SELECT 1 FROM nudges WHERE task_id = ? AND kind = 'stall-retry'", &[&t.id]);
             if !retried {
                 log(&format!("stalled task {} ({}); retrying once", &t.id[..8], t.to_agent));
-                let _ = self.insert_nudge(&format!("{}:stall-retry", t.id), &t, &t.to_agent, "stall-retry")?;
+                let sr_key = format!("{}:stall-retry", t.id);
+                if self.insert_nudge(&sr_key, &t, &t.to_agent, "stall-retry")? {
+                    self.finish_nudge(&sr_key, "delivered", 0, None);
+                }
                 self.event(&t, "stall_retry", &t.to_agent, &format!("{}s", age_s.round()));
                 if let (false, Some(s)) = (self.cfg.dry, &session) {
                     if let Err(err) = self.deliver(s, &t.to_agent, &nudge_text("assignee", &t)) {
@@ -572,8 +664,8 @@ impl Dispatcher {
                 log(&format!("task {} still stalled; marking failed", &t.id[..8]));
                 self.conn
                     .execute(
-                        "INSERT OR IGNORE INTO nudges (key, task_id, context_id, target, kind, created_at) VALUES (?,?,?,?,?,?)",
-                        params![format!("{}:stall-failed", t.id), t.id, t.context_id, t.to_agent, "stall-failed", now()],
+                        "INSERT OR IGNORE INTO nudges (key, task_id, context_id, target, kind, status, delivered_at, created_at, updated_at) VALUES (?,?,?,?,?,'delivered',?,?,?)",
+                        params![format!("{}:stall-failed", t.id), t.id, t.context_id, t.to_agent, "stall-failed", now(), now(), now()],
                     )
                     .map_err(e)?;
                 self.event(&t, "stall_failed", &t.to_agent, &format!("{}s", age_s.round()));
@@ -593,14 +685,20 @@ impl Dispatcher {
         for t in &rows {
             self.conn
                 .execute(
-                    "INSERT OR IGNORE INTO nudges (key, task_id, context_id, target, kind, created_at) VALUES (?,?,?,?,?,?)",
-                    params![format!("{}:{}:requester", t.id, status_message_id(t)), t.id, t.context_id, t.from_agent, "baseline", now()],
+                    "INSERT OR IGNORE INTO nudges (key, task_id, context_id, target, kind, status, delivered_at, created_at, updated_at) VALUES (?,?,?,?,?,'delivered',?,?,?)",
+                    params![format!("{}:{}:requester", t.id, status_message_id(t)), t.id, t.context_id, t.from_agent, "baseline", now(), now(), now()],
                 )
                 .map_err(e)?;
         }
         log(&format!("baseline: {} finished task(s) marked as already handled", rows.len()));
         Ok(())
     }
+}
+
+const NUDGE_LEASE_MS: i64 = 60_000;
+
+fn iso_after_ms(ms: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::milliseconds(ms)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 fn status_message_id(t: &TaskRow) -> String {

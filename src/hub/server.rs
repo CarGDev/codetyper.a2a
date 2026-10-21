@@ -164,6 +164,7 @@ impl Hub {
             "get_task" => self.get_task(a),
             "list_tasks" => self.list_tasks(a),
             "update_task" => self.update_task(a),
+            "claim_task" => self.claim_task(a),
             "cancel_task" => self.cancel_task(a),
             _ => return None,
         })
@@ -171,16 +172,6 @@ impl Hub {
 
     fn register_agent(&self, a: &Args) -> Result<Value, String> {
         let name = need(a, "name")?;
-        if let (Some(sid), Some(dir)) = (s(a, "sessionId"), s(a, "directory")) {
-            Self::db_err(self.conn.execute(
-                "UPDATE sessions SET status='stale' WHERE agent=? AND directory=? AND session_id != ?",
-                params![name, dir, sid],
-            ))?;
-            Self::db_err(self.conn.execute(
-                "INSERT INTO sessions (agent, directory, session_id, created_at) VALUES (?,?,?,?) ON CONFLICT(agent, directory, session_id) DO UPDATE SET status='live'",
-                params![name, dir, sid, now()],
-            ))?;
-        }
         let card = json!({
             "name": name,
             "description": a.get("description").and_then(Value::as_str).unwrap_or(""),
@@ -188,15 +179,26 @@ impl Hub {
             "tags": a.get("tags").cloned().unwrap_or(json!([])),
             "source": "registered",
         });
+        let ts = now();
         Self::db_err(self.conn.execute(
-            "INSERT INTO agents (name, card, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET card = excluded.card, updated_at = excluded.updated_at",
-            params![name, card.to_string(), now()],
+            "INSERT INTO agents (name, card, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?) ON CONFLICT(name) DO UPDATE SET card = excluded.card, status = 'active', updated_at = excluded.updated_at",
+            params![name, card.to_string(), ts, ts],
         ))?;
+        if let (Some(sid), Some(dir)) = (s(a, "sessionId"), s(a, "directory")) {
+            Self::db_err(self.conn.execute(
+                "UPDATE sessions SET status='stale' WHERE agent=? AND directory=? AND session_id != ?",
+                params![name, dir, sid],
+            ))?;
+            Self::db_err(self.conn.execute(
+                "INSERT INTO sessions (agent, directory, session_id, created_at, last_seen_at) VALUES (?,?,?,?,?) ON CONFLICT(agent, directory, session_id) DO UPDATE SET status='live', last_seen_at = excluded.last_seen_at",
+                params![name, dir, sid, ts, ts],
+            ))?;
+        }
         Ok(card)
     }
 
     fn list_agents(&self, a: &Args) -> Result<Value, String> {
-        let mut st = Self::db_err(self.conn.prepare("SELECT card FROM agents ORDER BY name"))?;
+        let mut st = Self::db_err(self.conn.prepare("SELECT card FROM agents WHERE card != '{}' AND status = 'active' ORDER BY name"))?;
         let mut cards: Vec<Value> = Self::db_err(st.query_map([], |r| r.get::<_, String>(0)))?
             .flatten()
             .map(|c| parse(&c))
@@ -258,7 +260,7 @@ impl Hub {
                 // A reply from the requester re-opens the task for the assignee.
                 let state = if is_requester { "submitted" } else { row.state.as_str() };
                 Self::db_err(self.conn.execute(
-                    "UPDATE tasks SET history=?, state=?, status_message=?, updated_at=? WHERE id=?",
+                    "UPDATE tasks SET history=?, state=?, status_message=?, updated_at=?, version=version+1 WHERE id=?",
                     params![history.to_string(), state, msg.to_string(), ts, task_id],
                 ))?;
                 if is_requester {
@@ -285,10 +287,21 @@ impl Hub {
                 })?;
                 crate::opencode::detect(&own, from)
             });
+            for ag in [from, to] {
+                Self::db_err(db::ensure_agent(&self.conn, ag))?;
+            }
+            Self::db_err(db::ensure_context(&self.conn, &ctx))?;
+            // the first referenced task that exists becomes the parent (lineage)
+            let parent = a
+                .get("referenceTaskIds")
+                .and_then(Value::as_array)
+                .and_then(|ids| ids.iter().filter_map(Value::as_str).find(|r| self.row(r).is_ok()))
+                .map(String::from);
+            let priority = num(a, "priority").unwrap_or(0.0) as i64;
             Self::db_err(self.conn.execute(
-                "INSERT INTO tasks (id, context_id, from_agent, to_agent, state, status_message, history, artifacts, created_at, updated_at, directory, from_directory, from_session) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO tasks (id, context_id, parent_task_id, from_agent, to_agent, state, status_message, history, artifacts, priority, created_at, updated_at, directory, from_directory, from_session) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![
-                    id, ctx, from, to, "submitted", msg.to_string(), json!([msg]).to_string(), "[]",
+                    id, ctx, parent, from, to, "submitted", msg.to_string(), json!([msg]).to_string(), "[]", priority,
                     ts, ts, s(a, "directory"), s(a, "fromDirectory"), session
                 ],
             ))?;
@@ -330,8 +343,9 @@ impl Hub {
         }
         let rows: Vec<TaskRow> = db::tasks(
             &self.conn,
-            "WHERE ((to_agent = ? AND state IN ('submitted','working')) OR (to_agent = 'any' AND state = 'submitted')) ORDER BY created_at",
-            &[agent],
+            "WHERE ((to_agent = ? AND state IN ('submitted','working')) OR (to_agent = 'any' AND state = 'submitted'))
+               AND (claimed_by IS NULL OR claimed_by = ?) ORDER BY priority DESC, created_at",
+            &[agent, agent],
         )?
         .into_iter()
         .filter(|r| in_project(dir, &[r.directory.as_deref()]))
@@ -377,11 +391,22 @@ impl Hub {
             if TERMINAL.contains(&row.state.as_str()) {
                 return Err(format!("task {id} is {} (terminal); it cannot change", row.state));
             }
-            if row.to_agent != agent && row.to_agent != "any" {
+            if row.to_agent == "any" {
+                return Err(format!("task {id} is not claimed yet: call claim_task first"));
+            }
+            if row.to_agent != agent {
                 return Err(format!(
                     "only the assignee '{}' may update this task (you are '{agent}')",
                     row.to_agent
                 ));
+            }
+            if let Some(owner) = row.claimed_by.as_deref().filter(|o| *o != agent) {
+                return Err(format!("task {id} is claimed by '{owner}', not '{agent}'"));
+            }
+            if let Some(want) = num(a, "expectedVersion") {
+                if want as i64 != row.version {
+                    return Err(format!("version conflict on task {id}: expected {want}, current {}", row.version));
+                }
             }
             let ts = now();
             let mut history = parse(&row.history);
@@ -408,10 +433,40 @@ impl Hub {
             }
             let new_state = state.unwrap_or(if row.state == "submitted" { "working" } else { &row.state });
             Self::db_err(self.conn.execute(
-                "UPDATE tasks SET to_agent=?, state=?, status_message=?, history=?, artifacts=?, updated_at=? WHERE id=?",
-                params![agent, new_state, status_message, history.to_string(), artifacts.to_string(), ts, id],
+                "UPDATE tasks SET state=?, status_message=?, history=?, artifacts=?, updated_at=?, claimed_by=COALESCE(claimed_by, ?),
+                   version=version+1, completed_at=CASE WHEN ? THEN ? END WHERE id=? AND version=?",
+                params![new_state, status_message, history.to_string(), artifacts.to_string(), ts, agent,
+                        TERMINAL.contains(&new_state), ts, id, row.version],
             ))?;
             db::record_event(&self.conn, Some(id), Some(&row.context_id), "state_change", Some(agent), Some(new_state));
+            Ok(row_to_task(&self.row(id)?, 10))
+        })
+    }
+
+    /// Atomic claim: of any number of agents asking for the same task, exactly one wins. The task
+    /// must still be `submitted` and addressed to the caller or to `any`.
+    fn claim_task(&self, a: &Args) -> Result<Value, String> {
+        let id = need(a, "id")?;
+        let agent = need(a, "agent")?;
+        self.tx(|| {
+            let row = self.row(id)?;
+            Self::db_err(db::ensure_agent(&self.conn, agent))?;
+            let ts = now();
+            let n = Self::db_err(self.conn.execute(
+                "UPDATE tasks SET to_agent=?, claimed_by=?, state='working', version=version+1, updated_at=?
+                 WHERE id=? AND state='submitted' AND claimed_by IS NULL AND (to_agent=? OR to_agent='any')",
+                params![agent, agent, ts, id, agent],
+            ))?;
+            if n != 1 {
+                return Err(match row.claimed_by.as_deref() {
+                    Some(owner) => format!("task {id} is already claimed by '{owner}'"),
+                    None if row.to_agent != "any" && row.to_agent != agent => {
+                        format!("task {id} is addressed to '{}', not '{agent}'", row.to_agent)
+                    }
+                    None => format!("task {id} cannot be claimed (state {})", row.state),
+                });
+            }
+            db::record_event(&self.conn, Some(id), Some(&row.context_id), "task_claimed", Some(agent), Some(&row.to_agent));
             Ok(row_to_task(&self.row(id)?, 10))
         })
     }
@@ -436,8 +491,8 @@ impl Hub {
             let mut history = parse(&row.history);
             history.as_array_mut().map(|h| h.push(msg.clone()));
             Self::db_err(self.conn.execute(
-                "UPDATE tasks SET state='canceled', status_message=?, history=?, updated_at=? WHERE id=?",
-                params![msg.to_string(), history.to_string(), now(), id],
+                "UPDATE tasks SET state='canceled', status_message=?, history=?, updated_at=?, completed_at=?, version=version+1 WHERE id=?",
+                params![msg.to_string(), history.to_string(), now(), now(), id],
             ))?;
             db::record_event(&self.conn, Some(id), Some(&row.context_id), "state_change", Some(agent), Some("canceled"));
             Ok(row_to_task(&self.row(id)?, 10))
@@ -470,8 +525,8 @@ fn seed_agent_cards(conn: &Connection, dir: &Path) {
             "skills": [], "source": "agent-file",
         });
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO agents (name, card, updated_at) VALUES (?, ?, ?)",
-            params![name, card.to_string(), now()],
+            "INSERT OR IGNORE INTO agents (name, card, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)",
+            params![name, card.to_string(), now(), now()],
         );
     }
 }
@@ -553,11 +608,19 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "required": ["id", "agent"], "properties": {
                 "id": str_prop("task id"), "agent": str_prop("your agent name"),
                 "state": { "type": "string", "enum": states }, "text": str_prop("status message"),
+                "expectedVersion": { "type": "integer", "description": "optional: fail if the task changed since you read this version" },
                 "data": {}, "parts": part_arr,
                 "artifact": { "type": "object", "properties": {
                     "name": { "type": "string" }, "description": { "type": "string" },
                     "text": { "type": "string" }, "data": {}, "parts": part_arr,
                 }},
+            }},
+        },
+        {
+            "name": "claim_task",
+            "description": "Take a task for yourself before working on it. Required for tasks addressed to 'any'; atomic, so when several agents ask, exactly one succeeds and the others get an error and must stop. A task sent to you by name is yours without claiming.",
+            "inputSchema": { "type": "object", "required": ["id", "agent"], "properties": {
+                "id": str_prop("task id"), "agent": str_prop("your agent name"),
             }},
         },
         {

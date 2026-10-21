@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-21
+
+### Added
+
+- Hub database schema v2 (`a2a_hub.dbml`): `contexts`, agent status, task lineage/priority/version, session keys and leases, a nudge outbox with claim leases, event correlation ids. Migrated automatically from the old schema (a backup is kept next to the database as `<db>.bak-v1`); stop the running dispatcher (`oc stop`) before upgrading.
+- `claim_task`: atomic task claim. Of several agents asking for the same task exactly one wins; `update_task` is refused for unclaimed `any` tasks and for non-owners, and takes an optional `expectedVersion`.
+- Token and cost per agent: the dispatcher records what an assignee's session spent on each task (opencode's session totals), `oc stats` and `oc trace` show tokens and cost (an estimate from the published price table when opencode reports 0).
+
+### Fixed
+
+- Two agents could do the same `any` task and the second silently took it over, spending the tokens twice.
+
 ## [1.2.0] - 2026-10-20
 
 ### Added

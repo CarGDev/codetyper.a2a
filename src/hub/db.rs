@@ -16,7 +16,7 @@ pub const STATES: [&str; 8] = [
     "rejected",
 ];
 
-pub const TASK_COLS: &str = "id, context_id, from_agent, to_agent, state, status_message, history, artifacts, created_at, updated_at, requester_seen_at, directory, from_directory, from_session";
+pub const TASK_COLS: &str = "id, context_id, from_agent, to_agent, state, status_message, history, artifacts, created_at, updated_at, requester_seen_at, directory, from_directory, from_session, version, claimed_by, priority";
 
 #[derive(Debug, Clone)]
 pub struct TaskRow {
@@ -35,6 +35,11 @@ pub struct TaskRow {
     pub from_directory: Option<String>,
     /// The opencode session the requester runs in; results are routed back to it.
     pub from_session: Option<String>,
+    /// Compare-and-swap counter, bumped by every claim/update.
+    pub version: i64,
+    /// The agent that claimed the task (set by `claim_task`).
+    pub claimed_by: Option<String>,
+    pub priority: i64,
     /// Set by the dispatcher: the task named a folder itself (vs. one inferred later).
     pub explicit_dir: bool,
 }
@@ -78,6 +83,9 @@ pub fn task_from_row(r: &Row) -> rusqlite::Result<TaskRow> {
         directory: r.get(11)?,
         from_directory: r.get(12)?,
         from_session: r.get(13)?,
+        version: r.get(14)?,
+        claimed_by: r.get(15)?,
+        priority: r.get(16)?,
         explicit_dir: false,
     })
 }
@@ -118,11 +126,227 @@ pub fn sessions(conn: &Connection, tail: &str, params: &[&str]) -> Result<Vec<Se
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
+#[allow(dead_code)]
 fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
     let Ok(mut st) = conn.prepare(&format!("PRAGMA table_info({table})")) else { return false };
     st.query_map([], |r| r.get::<_, String>(1))
         .map(|rows| rows.flatten().any(|c| c == col))
         .unwrap_or(false)
+}
+
+
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// The schema of `a2a_hub.dbml`. Timestamps are fixed-width ISO-8601 UTC text, JSON columns are
+/// checked with json_valid(). `events` carries no foreign keys on purpose: it is append-only
+/// and best-effort, so tracing can never fail a call.
+const SCHEMA_V2: &str = "
+CREATE TABLE agents (
+  name TEXT PRIMARY KEY,
+  card TEXT NOT NULL CHECK (json_valid(card)),
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE contexts (
+  id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'active',
+  root_task_id TEXT,
+  metadata TEXT CHECK (metadata IS NULL OR json_valid(metadata)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX idx_contexts_state_updated ON contexts(state, updated_at);
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  context_id TEXT NOT NULL REFERENCES contexts(id),
+  parent_task_id TEXT REFERENCES tasks(id),
+  from_agent TEXT NOT NULL REFERENCES agents(name),
+  to_agent TEXT NOT NULL REFERENCES agents(name),
+  state TEXT NOT NULL DEFAULT 'submitted',
+  status_message TEXT,
+  history TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(history)),
+  artifacts TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(artifacts)),
+  version INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT,
+  requester_seen_at TEXT,
+  directory TEXT,
+  from_directory TEXT,
+  from_session TEXT,
+  from_session_key TEXT REFERENCES sessions(key),
+  claimed_by TEXT
+);
+CREATE INDEX idx_tasks_inbox ON tasks(to_agent, state, priority, created_at);
+CREATE INDEX idx_tasks_from ON tasks(from_agent, updated_at);
+CREATE INDEX idx_tasks_context ON tasks(context_id, created_at);
+CREATE INDEX idx_tasks_parent ON tasks(parent_task_id);
+CREATE INDEX idx_tasks_state_updated ON tasks(state, updated_at);
+CREATE TABLE sessions (
+  key TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+  agent TEXT NOT NULL REFERENCES agents(name),
+  directory TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  tmux_target TEXT,
+  status TEXT NOT NULL DEFAULT 'live',
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT,
+  lease_expires_at TEXT,
+  ended_at TEXT
+);
+CREATE UNIQUE INDEX uq_sessions_runtime ON sessions(agent, directory, session_id);
+CREATE INDEX idx_sessions_live ON sessions(agent, status, lease_expires_at);
+CREATE TABLE nudges (
+  key TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  context_id TEXT NOT NULL REFERENCES contexts(id),
+  target TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  claimed_by TEXT,
+  claim_expires_at TEXT,
+  delivered_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_nudges_ready ON nudges(status, next_attempt_at, created_at);
+CREATE INDEX idx_nudges_expired_claims ON nudges(status, claim_expires_at);
+CREATE INDEX idx_nudges_task ON nudges(task_id, created_at);
+CREATE INDEX idx_nudges_context ON nudges(context_id, created_at);
+CREATE TABLE hop_allow (
+  context_id TEXT PRIMARY KEY REFERENCES contexts(id),
+  grants INTEGER NOT NULL DEFAULT 0,
+  notified_level INTEGER NOT NULL DEFAULT 0,
+  last_continue_msg TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  task_id TEXT,
+  context_id TEXT,
+  kind TEXT NOT NULL,
+  agent TEXT,
+  session_key TEXT,
+  correlation_id TEXT,
+  causation_id TEXT,
+  detail TEXT,
+  tokens_in INTEGER,
+  tokens_out INTEGER,
+  cost_usd REAL
+);
+CREATE INDEX idx_events_task ON events(task_id, id);
+CREATE INDEX idx_events_context ON events(context_id, id);
+CREATE INDEX idx_events_kind_ts ON events(kind, ts);
+CREATE INDEX idx_events_correlation ON events(correlation_id, id);
+";
+
+/// v1 (the original schema, `user_version` 0) -> v2: every table is renamed, recreated from
+/// SCHEMA_V2 and refilled, with the placeholder agents/contexts the foreign keys need.
+const UPGRADE_V1_TO_V2: &str = "
+DROP INDEX IF EXISTS idx_tasks_to;
+DROP INDEX IF EXISTS idx_tasks_from;
+DROP INDEX IF EXISTS idx_tasks_ctx;
+DROP INDEX IF EXISTS idx_events_task;
+ALTER TABLE agents RENAME TO agents_v1;
+ALTER TABLE tasks RENAME TO tasks_v1;
+ALTER TABLE sessions RENAME TO sessions_v1;
+ALTER TABLE nudges RENAME TO nudges_v1;
+ALTER TABLE hop_allow RENAME TO hop_allow_v1;
+ALTER TABLE events RENAME TO events_v1;
+";
+
+const COPY_V1_TO_V2: &str = "
+INSERT INTO agents (name, card, status, created_at, updated_at)
+  SELECT name, CASE WHEN json_valid(card) THEN card ELSE '{}' END, 'active', updated_at, updated_at FROM agents_v1;
+INSERT OR IGNORE INTO agents (name, card, status, created_at, updated_at)
+  SELECT n, '{}', 'active', strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM (
+    SELECT from_agent AS n FROM tasks_v1 UNION SELECT to_agent FROM tasks_v1
+    UNION SELECT agent FROM sessions_v1 UNION SELECT 'any');
+INSERT INTO contexts (id, state, created_at, updated_at, completed_at)
+  SELECT c, CASE WHEN SUM(open) > 0 THEN 'active' ELSE 'completed' END, MIN(ca), MAX(ua),
+         CASE WHEN SUM(open) > 0 THEN NULL ELSE MAX(ua) END
+  FROM (
+    SELECT context_id AS c, CASE WHEN state IN ('completed','failed','canceled','rejected') THEN 0 ELSE 1 END AS open,
+           created_at AS ca, updated_at AS ua FROM tasks_v1
+    UNION ALL SELECT context_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      FROM hop_allow_v1
+    UNION ALL SELECT context_id, 0, created_at, created_at FROM nudges_v1 WHERE context_id IS NOT NULL
+  ) GROUP BY c;
+INSERT INTO tasks (id, context_id, from_agent, to_agent, state, status_message, history, artifacts, created_at,
+                   updated_at, completed_at, requester_seen_at, directory, from_directory, from_session)
+  SELECT id, context_id, from_agent, to_agent, state, status_message,
+         CASE WHEN json_valid(history) THEN history ELSE '[]' END,
+         CASE WHEN json_valid(artifacts) THEN artifacts ELSE '[]' END,
+         created_at, updated_at,
+         CASE WHEN state IN ('completed','failed','canceled','rejected') THEN updated_at END,
+         requester_seen_at, directory, from_directory, from_session FROM tasks_v1;
+INSERT INTO sessions (agent, directory, session_id, tmux_target, status, created_at, last_seen_at)
+  SELECT agent, directory, session_id, tmux_target, status, created_at, created_at FROM sessions_v1;
+INSERT INTO nudges (key, task_id, context_id, target, kind, status, attempts, delivered_at, created_at, updated_at)
+  SELECT key, task_id, context_id, target, kind,
+         CASE WHEN kind IN ('no-agent','no-session') THEN 'dead' ELSE 'delivered' END, 0,
+         CASE WHEN kind IN ('no-agent','no-session') THEN NULL ELSE created_at END, created_at, created_at
+  FROM nudges_v1 WHERE context_id IS NOT NULL AND task_id IN (SELECT id FROM tasks);
+INSERT INTO hop_allow (context_id, grants, notified_level, last_continue_msg, updated_at)
+  SELECT context_id, grants, notified_level, last_continue_msg, strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM hop_allow_v1;
+INSERT INTO events (id, ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out, cost_usd)
+  SELECT id, ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out, cost_usd FROM events_v1;
+DROP TABLE agents_v1; DROP TABLE tasks_v1; DROP TABLE sessions_v1; DROP TABLE nudges_v1;
+DROP TABLE hop_allow_v1; DROP TABLE events_v1;
+";
+
+fn user_version(conn: &Connection) -> Result<i64, String> {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    exists(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", &[name])
+}
+
+/// Bring the file to SCHEMA_VERSION. Safe with several processes starting at once: the version is
+/// re-read inside the write transaction, so only one of them migrates. A v1 file is copied to
+/// `<db>.bak-v1` first. Foreign keys are off while tables are rebuilt.
+fn migrate(conn: &Connection, path: &Path) -> Result<(), String> {
+    if user_version(conn)? >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    conn.execute_batch("PRAGMA foreign_keys = OFF").map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+    let run = || -> Result<(), String> {
+        let v = user_version(conn)?;
+        if v >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        let legacy = table_exists(conn, "tasks");
+        if legacy {
+            let mut bak = path.as_os_str().to_owned();
+            bak.push(".bak-v1");
+            let bak = std::path::PathBuf::from(bak);
+            if !bak.exists() {
+                let _ = std::fs::copy(path, &bak); // best effort; the transaction is the real safety net
+            }
+            conn.execute_batch(UPGRADE_V1_TO_V2).map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch(SCHEMA_V2).map_err(|e| e.to_string())?;
+        if legacy {
+            conn.execute_batch(COPY_V1_TO_V2).map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).map_err(|e| e.to_string())
+    };
+    match run() {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(|e| e.to_string()),
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(format!("database migration failed: {e}"))
+        }
+    }
 }
 
 /// Open (creating if needed) the shared database. `busy_timeout` is set BEFORE anything that
@@ -140,58 +364,33 @@ pub fn open(path: &Path) -> Result<Connection, String> {
             Err(_) => std::thread::sleep(Duration::from_millis(150)),
         }
     }
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS agents (
-           name TEXT PRIMARY KEY, card TEXT NOT NULL, updated_at TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS tasks (
-           id TEXT PRIMARY KEY,
-           context_id TEXT NOT NULL,
-           from_agent TEXT NOT NULL,
-           to_agent TEXT NOT NULL,
-           state TEXT NOT NULL,
-           status_message TEXT,
-           history TEXT NOT NULL,
-           artifacts TEXT NOT NULL,
-           created_at TEXT NOT NULL,
-           updated_at TEXT NOT NULL,
-           requester_seen_at TEXT
-         );
-         CREATE INDEX IF NOT EXISTS idx_tasks_to ON tasks(to_agent, state);
-         CREATE INDEX IF NOT EXISTS idx_tasks_from ON tasks(from_agent, updated_at);
-         CREATE INDEX IF NOT EXISTS idx_tasks_ctx ON tasks(context_id);
-         CREATE TABLE IF NOT EXISTS sessions (
-           agent TEXT NOT NULL, directory TEXT NOT NULL, session_id TEXT NOT NULL,
-           tmux_target TEXT, status TEXT NOT NULL DEFAULT 'live', created_at TEXT NOT NULL,
-           PRIMARY KEY (agent, directory, session_id)
-         );
-         CREATE TABLE IF NOT EXISTS nudges (
-           key TEXT PRIMARY KEY, task_id TEXT NOT NULL, context_id TEXT, target TEXT NOT NULL,
-           kind TEXT NOT NULL, created_at TEXT NOT NULL
-         );
-         CREATE TABLE IF NOT EXISTS hop_allow (
-           context_id TEXT PRIMARY KEY, grants INTEGER NOT NULL DEFAULT 0,
-           notified_level INTEGER NOT NULL DEFAULT 0, last_continue_msg TEXT
-         );
-         CREATE TABLE IF NOT EXISTS events (
-           id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, task_id TEXT, context_id TEXT,
-           kind TEXT NOT NULL, agent TEXT, session TEXT, detail TEXT,
-           tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL
-         );
-         CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id);",
-    )
-    .map_err(|e| e.to_string())?;
-    for col in ["directory", "from_directory", "from_session"] {
-        if !has_column(&conn, "tasks", col) {
-            // another process may have added it in the meantime
-            let _ = conn.execute(&format!("ALTER TABLE tasks ADD COLUMN {col} TEXT"), []);
-        }
-    }
+    migrate(&conn, path)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON").map_err(|e| e.to_string())?;
     Ok(conn)
 }
 
+/// Foreign keys need the rows a task points at; create placeholders (`INSERT OR IGNORE`, so a real
+/// card or context is never overwritten).
+pub fn ensure_agent(conn: &Connection, name: &str) -> rusqlite::Result<()> {
+    let t = now();
+    conn.execute(
+        "INSERT OR IGNORE INTO agents (name, card, status, created_at, updated_at) VALUES (?, '{}', 'active', ?, ?)",
+        rusqlite::params![name, t, t],
+    )
+    .map(|_| ())
+}
+
+pub fn ensure_context(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    let t = now();
+    conn.execute(
+        "INSERT OR IGNORE INTO contexts (id, state, created_at, updated_at) VALUES (?, 'active', ?, ?)",
+        rusqlite::params![id, t, t],
+    )
+    .map(|_| ())
+}
+
 /// Best-effort trace event: its own errors are ignored so tracing can never break a tick or a tool
-/// call. Tokens and cost stay NULL (opencode does not expose usage to us).
+/// call. Tokens and cost are only set by `record_usage`.
 pub fn record_event(
     conn: &Connection,
     task_id: Option<&str>,
@@ -203,6 +402,24 @@ pub fn record_event(
     let _ = conn.execute(
         "INSERT INTO events (ts, task_id, context_id, kind, agent, detail) VALUES (?,?,?,?,?,?)",
         rusqlite::params![now(), task_id, context_id, kind, agent, detail],
+    );
+}
+
+/// A usage event: tokens in/out and cost for one task, with the details (cache, reasoning,
+/// cumulative session totals) as JSON in `detail`. Best effort like `record_event`.
+pub fn record_usage(
+    conn: &Connection,
+    task_id: &str,
+    context_id: &str,
+    agent: &str,
+    tokens_in: i64,
+    tokens_out: i64,
+    cost_usd: Option<f64>,
+    detail: &str,
+) {
+    let _ = conn.execute(
+        "INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out, cost_usd) VALUES (?,?,?,'usage',?,?,?,?,?)",
+        rusqlite::params![now(), task_id, context_id, agent, detail, tokens_in, tokens_out, cost_usd],
     );
 }
 

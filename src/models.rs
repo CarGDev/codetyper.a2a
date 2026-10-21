@@ -104,6 +104,13 @@ pub fn price_hint(model: &str) -> &'static str {
     }
 }
 
+/// `price_hint` as numbers: USD per 1M tokens, (input, output). None for unpriced models.
+pub fn price(model: &str) -> Option<(f64, f64)> {
+    let (i, o) = price_hint(model).split_once('/')?;
+    let n = |t: &str| t.trim().trim_start_matches('$').parse::<f64>().ok();
+    Some((n(i)?, n(o)?))
+}
+
 // ---- config ---------------------------------------------------------------------------------
 
 /// The opencode config, plus whether it is plain JSON (a JSONC file with comments is not rewritten).

@@ -77,7 +77,7 @@ pub fn run() -> i32 {
     let init = a.rpc("initialize", json!({ "protocolVersion": "2025-06-18" }));
     ok(init["result"]["serverInfo"]["name"] == "a2a-hub", "initialize");
     let tl = a.rpc("tools/list", json!({}));
-    ok(tl["result"]["tools"].as_array().map(Vec::len) == Some(8), "tools/list = 8 tools");
+    ok(tl["result"]["tools"].as_array().map(Vec::len) == Some(9), "tools/list = 9 tools");
     let agents_v = a.call("list_agents", json!({ "query": "debugger" })).1;
     ok(agents_v["agents"].as_array().is_some_and(|l| l.iter().any(|c| c["name"] == "debugger")), "agent cards auto-seeded");
 
@@ -116,6 +116,9 @@ pub fn run() -> i32 {
     let t2 = a.call("send_message", json!({ "from": "brain", "to": "any", "text": "anyone", "referenceTaskIds": [id] })).1;
     ok(b.call("inbox", json!({ "agent": "qa-tester" })).1["count"] == 1, "'any' task visible to any agent");
     let t2id = t2["id"].as_str().unwrap_or("").to_string();
+    ok(!a.call("claim_task", json!({ "id": t2id, "agent": "qa-tester" })).0, "first claim of an 'any' task wins");
+    ok(b.call("claim_task", json!({ "id": t2id, "agent": "mentor" })).0, "second claim of the same task is refused");
+    ok(b.call("inbox", json!({ "agent": "mentor" })).1["count"] == 0, "claimed task leaves the loser's inbox");
     ok(a.call("cancel_task", json!({ "id": t2id, "agent": "brain", "reason": "nvm" })).1["status"]["state"] == "canceled", "cancel works");
     ok(a.call("list_tasks", json!({ "contextId": "ctx1" })).1["count"] == 1, "list_tasks by contextId");
     ok(a.call("send_message", json!({ "from": "x" })).0, "validation error returned as isError");

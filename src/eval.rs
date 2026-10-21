@@ -271,8 +271,8 @@ fn round_trip(dispatchers: usize) -> Result<(Sandbox, String), String> {
 fn nudge_kinds(sb: &Sandbox) -> Result<(i64, i64, i64), String> {
     let total = sb.count("SELECT COUNT(*) FROM nudges")?;
     let distinct = sb.count("SELECT COUNT(DISTINCT key) FROM nudges")?;
-    let assignee = sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'assignee'")?;
-    let requester = sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'requester'")?;
+    let assignee = sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'assignee' AND status = 'delivered'")?;
+    let requester = sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'requester' AND status = 'delivered'")?;
     if total != distinct {
         return Err(format!(
             "duplicate nudge keys: {total} rows, {distinct} distinct"
@@ -334,7 +334,7 @@ fn hop_cap() -> Check {
         1,
     )?;
     let delivered = sb
-        .count("SELECT COUNT(*) FROM nudges WHERE context_id = 'eval-ctx' AND kind = 'assignee'")?;
+        .count("SELECT COUNT(*) FROM nudges WHERE context_id = 'eval-ctx' AND kind = 'assignee' AND status = 'delivered'")?;
     if delivered != 1 {
         return Err(format!(
             "{delivered} assignee deliveries, cap allows 1 ({second})"

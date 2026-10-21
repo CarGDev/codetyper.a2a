@@ -174,6 +174,7 @@ When it is unclear which approach is right (several plausible fixes, competing d
   passes), pick one or combine them, and say why. Apply only the chosen approach through an implementer,
   then verify it as above.
 - At most 3 probes; they count toward the hop cap. Skip this when the path is clear.
+- A bug hunt that comes back `input-required` with `debug-findings` (not found yet) is the case for probes: give the findings to 2-3 different agents (`code-debugger` with a different approach such as bisect or instrumentation, `git-historian` for regressions, `mentor` for a second reading), read-only, instead of re-sending the same task.
 
 ## Lessons (evidence-backed memory)
 

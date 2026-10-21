@@ -107,6 +107,8 @@ pub struct AgentStats {
     pub delivered: i64,
     pub released: i64,
     pub avg_ms: Option<i64>,
+    pub tokens_in: Option<i64>,
+    pub tokens_out: Option<i64>,
     pub cost_usd: Option<f64>,
 }
 
@@ -119,7 +121,9 @@ pub fn agent_stats(conn: &Connection) -> Result<Vec<AgentStats>, String> {
                (SELECT COUNT(*) FROM tasks t WHERE t.to_agent = a.name AND t.state = 'failed'),
                (SELECT COUNT(*) FROM events e WHERE e.agent = a.name AND e.kind = 'nudge_delivered'),
                (SELECT COUNT(*) FROM events e WHERE e.agent = a.name AND e.kind = 'nudge_released'),
-               (SELECT SUM(e.cost_usd) FROM events e WHERE e.agent = a.name)
+               (SELECT SUM(e.cost_usd) FROM events e WHERE e.agent = a.name AND e.kind = 'usage'),
+               (SELECT SUM(e.tokens_in) FROM events e WHERE e.agent = a.name AND e.kind = 'usage'),
+               (SELECT SUM(e.tokens_out) FROM events e WHERE e.agent = a.name AND e.kind = 'usage')
              FROM (SELECT to_agent AS name FROM tasks UNION SELECT agent FROM events WHERE agent IS NOT NULL) a
              ORDER BY a.name",
         )
@@ -135,6 +139,8 @@ pub fn agent_stats(conn: &Connection) -> Result<Vec<AgentStats>, String> {
                 released: r.get(5)?,
                 avg_ms: None,
                 cost_usd: r.get(6)?,
+                tokens_in: r.get(7)?,
+                tokens_out: r.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -157,10 +163,29 @@ pub fn agent_stats(conn: &Connection) -> Result<Vec<AgentStats>, String> {
     Ok(stats)
 }
 
+fn tok(n: i64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1e6)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1e3)
+    } else {
+        n.to_string()
+    }
+}
+
+fn usage_cell(i: Option<i64>, o: Option<i64>, c: Option<f64>) -> String {
+    let tokens = match (i, o) {
+        (None, None) => "n/a".to_string(),
+        (i, o) => format!("{}/{}", tok(i.unwrap_or(0)), tok(o.unwrap_or(0))),
+    };
+    // cost is an estimate whenever opencode reports 0 (subscription providers): shown with `~`
+    format!("{tokens} {}", c.map_or("n/a".into(), |c| format!("~${c:.4}")))
+}
+
 pub fn format_stats(stats: &[AgentStats]) -> String {
     let mut out = format!(
         "{:<20} {:>5} {:>5} {:>5} {:>9} {:>8} {:>10}  {}\n",
-        "agent", "recv", "done", "fail", "delivered", "released", "avg", "tokens/cost"
+        "agent", "recv", "done", "fail", "delivered", "released", "avg", "tokens in/out, cost"
     );
     for s in stats {
         out.push_str(&format!(
@@ -172,8 +197,18 @@ pub fn format_stats(stats: &[AgentStats]) -> String {
             s.delivered,
             s.released,
             s.avg_ms.map_or("n/a".into(), secs),
-            s.cost_usd.map_or("n/a".into(), |c| format!("${c:.4}"))
+            usage_cell(s.tokens_in, s.tokens_out, s.cost_usd)
         ));
+    }
+    if stats.iter().any(|s| s.tokens_in.is_some() || s.tokens_out.is_some()) {
+        let sum = |f: fn(&AgentStats) -> Option<i64>| Some(stats.iter().filter_map(f).sum::<i64>());
+        let cost: f64 = stats.iter().filter_map(|s| s.cost_usd).sum();
+        out.push_str(&format!(
+            "{:<20} {:>5} {:>5} {:>5} {:>9} {:>8} {:>10}  {}\n",
+            "total", "", "", "", "", "", "",
+            usage_cell(sum(|s| s.tokens_in), sum(|s| s.tokens_out), Some(cost))
+        ));
+        out.push_str("(cost is opencode's figure when it charges, otherwise an estimate from the published price table)\n");
     }
     out
 }
@@ -198,6 +233,9 @@ mod tests {
             directory: None,
             from_directory: None,
             from_session: None,
+            version: 0,
+            claimed_by: None,
+            priority: 0,
             explicit_dir: false,
         }
     }
@@ -258,5 +296,15 @@ mod tests {
         };
         let out = format_stats(&[s]);
         assert!(out.contains("mentor") && out.contains("n/a"), "{out}");
+    }
+
+    #[test]
+    fn stats_show_tokens_cost_and_a_total_row() {
+        let a = AgentStats { agent: "mentor".into(), tokens_in: Some(1_500_000), tokens_out: Some(2_000), cost_usd: Some(0.6), ..Default::default() };
+        let b = AgentStats { agent: "build".into(), tokens_in: Some(500), tokens_out: Some(100), cost_usd: None, ..Default::default() };
+        let out = format_stats(&[a, b]);
+        assert!(out.contains("1.5M/2.0k ~$0.6000"), "{out}");
+        assert!(out.contains("500/100 n/a"), "{out}");
+        assert!(out.contains("total") && out.contains("1.5M/2.1k"), "{out}");
     }
 }
