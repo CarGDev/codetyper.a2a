@@ -229,5 +229,15 @@ pub fn tmux_ensure_window(name: &str, cmd: &str) -> Result<Tab, String> {
     if windows.lines().any(|w| w == name) {
         return Ok(Tab::AlreadyOpen);
     }
+    // Concurrent callers (hub, tui plugin, oc) all see "no window" at once: only the one that
+    // takes the lock opens it. A lock older than 20s is stale.
+    let lock = std::env::temp_dir().join(format!("a2a-window-{}.lock", name.replace('/', "_")));
+    let stale = std::fs::metadata(&lock).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d.as_secs() > 20);
+    if stale {
+        let _ = std::fs::remove_file(&lock);
+    }
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+        return Ok(Tab::AlreadyOpen);
+    }
     tmux(&["new-window", "-d", "-t", &format!("{sess}:"), "-n", name, cmd]).map(|_| Tab::Created)
 }

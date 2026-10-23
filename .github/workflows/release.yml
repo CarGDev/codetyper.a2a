@@ -58,6 +58,14 @@ jobs:
         working-directory: tap
         run: |
           f=Formula/codetypera2a.rb
+          # keep the version being replaced installable: brew install codetypera2a@1.3.1
+          old=$(sed -nE 's|^  url ".*/v?([0-9]+\.[0-9]+\.[0-9]+)\.tar\.gz".*|\1|p' "$f")
+          new="${GITHUB_REF_NAME#v}"
+          if [ -n "$old" ] && [ "$old" != "$new" ] && [ ! -e "Formula/codetypera2a@$old.rb" ]; then
+            cls="Codetypera2aAT$(echo "$old" | tr -d .)"
+            sed -E "s|^class Codetypera2a < Formula|class $cls < Formula|; s|^  depends_on \"rust\" => :build|  keg_only :versioned_formula\n\n  depends_on \"rust\" => :build|" "$f" > "Formula/codetypera2a@$old.rb"
+            git add "Formula/codetypera2a@$old.rb"
+          fi
           sed -i -E 's|^(  url ")[^"]*(")|\1${{ steps.src.outputs.url }}\2|' "$f"
           sed -i -E 's|^(  sha256 ")[^"]*(")|\1${{ steps.src.outputs.sha }}\2|' "$f"
           grep -nE '^  (url|sha256) ' "$f"

@@ -973,7 +973,9 @@ pub fn ensure_running() -> Result<Option<u32>, String> {
 fn start_dispatcher() -> Result<Option<u32>, String> {
     terminate_all(registered().into_iter().map(|(p, _)| p));
     let exe = std::env::current_exe().map_err(e)?;
-    sys::spawn_detached(&exe, &["dispatcher"], &log_path()).map(Some).map_err(e)
+    // the `oc` name only knows `dispatch`; anything else would be handed to opencode as a folder
+    let sub = if exe.file_name().is_some_and(|n| n == "oc") { "dispatch" } else { "dispatcher" };
+    sys::spawn_detached(&exe, &[sub], &log_path()).map(Some).map_err(e)
 }
 
 pub fn log_path() -> PathBuf {
@@ -985,8 +987,16 @@ pub fn log_path() -> PathBuf {
 /// Inside tmux, keep a detached `a2a-status` window following the dispatcher live
 /// (`oc watch`), so the A2A traffic is visible without taking over your pane.
 pub fn ensure_status_window() -> Result<sys::Tab, String> {
+    // Never from inside the status window itself: it would only spawn more of them.
+    if std::env::var("A2A_STATUS_WINDOW").as_deref() == Ok("1") {
+        return Ok(sys::Tab::AlreadyOpen);
+    }
     let exe = std::env::current_exe().map_err(e)?;
-    sys::tmux_ensure_window("a2a-status", &format!("{} oc watch", sys::sh(&exe.display().to_string())))
+    // Run through the `oc` symlink, current_exe is `oc` and the `oc` subcommand would be handed
+    // to opencode (which fails, closes the window and gets it reopened forever).
+    let watch = if exe.file_name().is_some_and(|n| n == "oc") { "watch" } else { "oc watch" };
+    let cmd = format!("A2A_STATUS_WINDOW=1 A2A_NO_DISPATCHER=1 {} {watch}", sys::sh(&exe.display().to_string()));
+    sys::tmux_ensure_window("a2a-status", &cmd)
 }
 
 pub fn run() -> i32 {

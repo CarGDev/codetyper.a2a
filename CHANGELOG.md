@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-10-23
+
+### Fixed
+
+- Starting opencode through the `oc` name (the `alias opencode='oc'` from `init --shell`, or the `oc` symlink) opened `a2a-status` tmux windows endlessly (106 in one report). The window ran `oc oc watch` and the dispatcher was started as `oc dispatcher`; `oc` handed those words to opencode, which failed, closed the window and got it reopened by the next startup check. Under the `oc` name the commands are now `oc watch` and `oc dispatch`.
+- The `a2a-status` window no longer tries to open another one from inside itself, and a short-lived lock lets only one of several simultaneous callers (hub, tabs plugin, `oc`) open it.
+
+### Added
+
+- Releases keep the version being replaced installable from Homebrew as `codetypera2a@<version>` (keg-only), so older versions stay available next to the latest.
+- `security-scanner` agent: checklist of the OWASP Top 10:2025 categories and parameter hunting for the OWASP Top 25 Parameters vulnerability classes.
+
 ## [1.3.2] - 2026-10-21
 
 ### Fixed
