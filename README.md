@@ -50,7 +50,9 @@ Research's [harness2](https://github.com/google-research/harness2) and the
 - [opencode](https://opencode.ai) v2 (developed against 2.0.32). Check with `opencode --version`.
 - A Rust toolchain (edition 2024, so Rust 1.85 or newer) to build it: `brew install rust` or
   [rustup](https://rustup.rs). SQLite is bundled, nothing else to install.
-- Optional: `tmux` (a live `a2a-status` window), and the companion MCP tools below.
+- `tmux`: a2a opens one tab per agent and the live `a2a-status` window in tmux, so `oc` and the plugin
+  refuse to start without it (`brew install tmux`, then run opencode inside a `tmux` session).
+- Optional: the companion MCP tools below.
 
 ### Option A: Homebrew
 
@@ -95,7 +97,9 @@ codetypera2a help             # the binary runs
 oc status                     # dispatcher: running (it is started by the a2a MCP server)
 ```
 
-`init` is safe to re-run (existing files are skipped unless `--force`). Useful options:
+`init` is safe to re-run (existing files are skipped unless `--force`). After upgrading the binary,
+`codetypera2a init --md-only` (alias `codetypera2a update`) refreshes only the agent, command and
+PROTOCOL markdown and keeps your saved models. Useful options:
 `--tools` runs the companion tools' own opencode setup first (`engram setup opencode`,
 `codegraph install`), `--no-link` skips the `oc` symlink, `--dir <path>` / `$OPENCODE_CONFIG_DIR`
 targets another config dir.
@@ -139,12 +143,19 @@ Use `--dir <path>` / `$OPENCODE_CONFIG_DIR` for another config dir, `--no-link` 
 
 ## Use
 
+<p align="center">
+  <img src="images/oc-running.gif" alt="opencode running with a2a: the orchestrator sends tasks, agents open as tabs, the status tab follows along" width="100%">
+</p>
+
+Start a tmux session first (a2a needs tmux), then run opencode in it:
+
 ```sh
-opencode        # just run opencode (in tmux if you like)
+tmux
+opencode        # or: oc
 ```
 
-Whenever opencode starts, the tabs plugin runs `oc ensure`: the dispatcher is started if needed and,
-inside tmux, a detached `a2a-status` tab opens with the live status. No alias needed
+Whenever opencode starts, the tabs plugin runs `oc ensure`: the dispatcher is started if needed and a
+detached `a2a-status` tab opens with the live status (outside tmux it stops with a message instead). No alias needed
 (`codetypera2a init --shell` only adds `alias opencode='oc'`, which does the same through `oc`).
 
 opencode opens on the `orchestrator`. Ask it for something; it plans with `plan`, routes with
@@ -184,6 +195,28 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 
 a2a needs tmux (one tab per agent): `oc` refuses to start when tmux is not installed or the pane is not
 inside it. opencode's own flags and plain subcommands (`models`, `run`, `--version`) still work without it.
+
+### Inside opencode (the panels plugin)
+
+The plugin adds a few things to the opencode TUI (they come from `plugins/a2a/panels.tsx`; if they do not
+show up, the tabs still work):
+
+- **Sidebar:** a progress bar (`██████──────  6.0 / 12`) and one row per task with a state symbol, the
+  agent in its own colour (the `color:` of its agent file) and a `⚠ hop cap` marker.
+- **Footer:** `a2a ● N open · ~$cost · tokens today`.
+- **Banner** above the prompt when a task waits for you or a context hit the hop cap.
+- **Notifications:** a toast and, with the window in the background, a system notification and sound when
+  a task needs you, finishes or fails.
+- **Slash commands:** `/a2a-answer` (pick one of the numbered options of an `input-required` task, or
+  write your own), `/a2a-continue` and `/a2a-cancel`.
+
+### Plans and small chunks
+
+The orchestrator makes work go plan, design, task, implementation, and each implementation task is one
+work unit of at most 400 changed lines with its tests and docs (a migration that cannot be split is the
+only exception). Plans are saved to Engram first (`a2a/plans/<project>/<slug>`); when Engram is not
+available they are files in `~/.config/opencode/plans/<project>/<number>/` (`plan.md`, `design.md`,
+`tasks.md`; `<number>` is the next free integer) or `.opencode/plans/<slug>/` in the project.
 
 Protocol details: [`a2a/PROTOCOL.md`](a2a/PROTOCOL.md).
 
@@ -253,7 +286,7 @@ it. `init` does not overwrite an existing policy file (add `--force`).
 - Sessions the dispatcher opens use **your opencode configuration and permissions** (for example an
   allow-all `bash` rule); there is no sandbox. Agents run with whatever tools you give them.
 - Keep agents least-privilege: the `orchestrator`, `plan` and `architect` templates cannot edit project
-  files (plans go to `.opencode/plans/`), and probes and reviews are read-only by instruction. Check the
+  files (plans go to `.opencode/plans/` or `~/.config/opencode/plans/`), and probes and reviews are read-only by instruction. Check the
   `tools:` and `permission:` blocks of any agent you add.
 - Task messages are stored in a local SQLite file (`~/.config/opencode/a2a/hub.db`): never put secrets
   in them.
