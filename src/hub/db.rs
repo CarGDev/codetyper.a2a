@@ -52,6 +52,8 @@ pub struct SessionRow {
     pub tmux_target: Option<String>,
     pub status: String,
     pub created_at: String,
+    /// The runtime that runs the session; `None` (NULL) is opencode.
+    pub backend: Option<String>,
 }
 
 /// ISO-8601 UTC with milliseconds, like JS `toISOString()`.
@@ -98,10 +100,11 @@ pub fn session_from_row(r: &Row) -> rusqlite::Result<SessionRow> {
         tmux_target: r.get(3)?,
         status: r.get(4)?,
         created_at: r.get(5)?,
+        backend: r.get(6)?,
     })
 }
 
-pub const SESSION_COLS: &str = "agent, directory, session_id, tmux_target, status, created_at";
+pub const SESSION_COLS: &str = "agent, directory, session_id, tmux_target, status, created_at, backend";
 
 /// `SELECT <cols> FROM tasks <tail>` with positional text params.
 pub fn tasks(conn: &Connection, tail: &str, params: &[&str]) -> Result<Vec<TaskRow>, String> {
@@ -135,12 +138,12 @@ fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
 }
 
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 5;
 
-/// The schema of `a2a_hub.dbml`. Timestamps are fixed-width ISO-8601 UTC text, JSON columns are
+/// The current schema (v5) of `a2a_hub.dbml`. Timestamps are fixed-width ISO-8601 UTC text, JSON columns are
 /// checked with json_valid(). `events` carries no foreign keys on purpose: it is append-only
 /// and best-effort, so tracing can never fail a call.
-const SCHEMA_V2: &str = "
+const SCHEMA: &str = "
 CREATE TABLE agents (
   name TEXT PRIMARY KEY,
   card TEXT NOT NULL CHECK (json_valid(card)),
@@ -195,7 +198,8 @@ CREATE TABLE sessions (
   created_at TEXT NOT NULL,
   last_seen_at TEXT,
   lease_expires_at TEXT,
-  ended_at TEXT
+  ended_at TEXT,
+  backend TEXT
 );
 CREATE UNIQUE INDEX uq_sessions_runtime ON sessions(agent, directory, session_id);
 CREATE INDEX idx_sessions_live ON sessions(agent, status, lease_expires_at);
@@ -239,16 +243,29 @@ CREATE TABLE events (
   detail TEXT,
   tokens_in INTEGER,
   tokens_out INTEGER,
-  cost_usd REAL
+  cost_usd REAL,
+  model TEXT,
+  source TEXT,
+  ref TEXT
 );
 CREATE INDEX idx_events_task ON events(task_id, id);
 CREATE INDEX idx_events_context ON events(context_id, id);
 CREATE INDEX idx_events_kind_ts ON events(kind, ts);
 CREATE INDEX idx_events_correlation ON events(correlation_id, id);
+CREATE INDEX idx_events_model ON events(kind, model);
+CREATE INDEX idx_events_source_model ON events(kind, source, model);
+CREATE UNIQUE INDEX idx_events_source_ref ON events(source, ref) WHERE ref IS NOT NULL;
+CREATE TABLE ingest_offsets (
+  source TEXT NOT NULL,
+  path TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, path)
+);
 ";
 
 /// v1 (the original schema, `user_version` 0) -> v2: every table is renamed, recreated from
-/// SCHEMA_V2 and refilled, with the placeholder agents/contexts the foreign keys need.
+/// SCHEMA and refilled, with the placeholder agents/contexts the foreign keys need.
 const UPGRADE_V1_TO_V2: &str = "
 DROP INDEX IF EXISTS idx_tasks_to;
 DROP INDEX IF EXISTS idx_tasks_from;
@@ -302,6 +319,41 @@ DROP TABLE agents_v1; DROP TABLE tasks_v1; DROP TABLE sessions_v1; DROP TABLE nu
 DROP TABLE hop_allow_v1; DROP TABLE events_v1;
 ";
 
+/// v2 -> v3: `events.model`, filled from the `$.model` of the usage events written before the column existed.
+const UPGRADE_V2_TO_V3: &str = "
+ALTER TABLE events ADD COLUMN model TEXT;
+CREATE INDEX idx_events_model ON events(kind, model);
+";
+
+/// Idempotent: only usage rows without a model whose `detail` is JSON with a non-empty text model are touched.
+/// v3 -> v4: `events.source` (NULL reads as opencode), `events.ref` (the tool's own id, unique per source) and the
+/// per-file read positions of the transcript ingester.
+const UPGRADE_V3_TO_V4: &str = "
+ALTER TABLE events ADD COLUMN source TEXT;
+ALTER TABLE events ADD COLUMN ref TEXT;
+CREATE INDEX idx_events_source_model ON events(kind, source, model);
+CREATE UNIQUE INDEX idx_events_source_ref ON events(source, ref) WHERE ref IS NOT NULL;
+CREATE TABLE ingest_offsets (
+  source TEXT NOT NULL,
+  path TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, path)
+);
+";
+
+/// v4 -> v5: `sessions.backend` names the runtime that runs the session (NULL reads as opencode), so the
+/// dispatcher looks an agent's live session up in the right backend.
+const UPGRADE_V4_TO_V5: &str = "
+ALTER TABLE sessions ADD COLUMN backend TEXT;
+";
+
+const BACKFILL_MODEL: &str = "
+UPDATE events SET model = json_extract(detail, '$.model')
+WHERE kind = 'usage' AND model IS NULL AND json_valid(detail)
+  AND json_type(detail, '$.model') = 'text' AND json_extract(detail, '$.model') != '';
+";
+
 fn user_version(conn: &Connection) -> Result<i64, String> {
     conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())
 }
@@ -310,9 +362,43 @@ fn table_exists(conn: &Connection, name: &str) -> bool {
     exists(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", &[name])
 }
 
-/// Bring the file to SCHEMA_VERSION. Safe with several processes starting at once: the version is
-/// re-read inside the write transaction, so only one of them migrates. A v1 file is copied to
-/// `<db>.bak-v1` first. Foreign keys are off while tables are rebuilt.
+/// `<db><suffix>` next to the file, once: a later migration never overwrites an older backup. Best
+/// effort; the transaction is the real safety net.
+fn backup(path: &Path, suffix: &str) {
+    let mut bak = path.as_os_str().to_owned();
+    bak.push(suffix);
+    let bak = std::path::PathBuf::from(bak);
+    if bak.exists() {
+        return;
+    }
+    let _ = std::fs::copy(path, &bak);
+}
+
+/// The stepwise upgrades of a file that is already v2 or newer; each step first copies the file to `<db>.bak-v<from>`.
+fn upgrade_from(conn: &Connection, path: &Path, from: i64) -> Result<(), String> {
+    let run = |sql: &str| conn.execute_batch(sql).map_err(|e| e.to_string());
+    if from == 2 {
+        backup(path, ".bak-v2");
+        run(UPGRADE_V2_TO_V3)?;
+        run(BACKFILL_MODEL)?;
+    }
+    if from == 3 {
+        backup(path, ".bak-v3");
+    }
+    if from <= 3 {
+        run(UPGRADE_V3_TO_V4)?;
+    }
+    if from == 4 {
+        backup(path, ".bak-v4");
+    }
+    run(UPGRADE_V4_TO_V5)?;
+    run(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+}
+
+/// Bring the file to SCHEMA_VERSION, one step per version. Safe with several processes starting at
+/// once: the version is re-read inside the write transaction, so only one of them migrates. A v1
+/// file is copied to `<db>.bak-v1` first, a v2 file to `<db>.bak-v2`, a v3 file to `<db>.bak-v3`, a v4 file to `<db>.bak-v4`. Foreign keys are off while
+/// tables are rebuilt.
 fn migrate(conn: &Connection, path: &Path) -> Result<(), String> {
     if user_version(conn)? >= SCHEMA_VERSION {
         return Ok(());
@@ -324,19 +410,18 @@ fn migrate(conn: &Connection, path: &Path) -> Result<(), String> {
         if v >= SCHEMA_VERSION {
             return Ok(());
         }
+        if v >= 2 {
+            return upgrade_from(conn, path, v);
+        }
         let legacy = table_exists(conn, "tasks");
         if legacy {
-            let mut bak = path.as_os_str().to_owned();
-            bak.push(".bak-v1");
-            let bak = std::path::PathBuf::from(bak);
-            if !bak.exists() {
-                let _ = std::fs::copy(path, &bak); // best effort; the transaction is the real safety net
-            }
+            backup(path, ".bak-v1");
             conn.execute_batch(UPGRADE_V1_TO_V2).map_err(|e| e.to_string())?;
         }
-        conn.execute_batch(SCHEMA_V2).map_err(|e| e.to_string())?;
+        conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
         if legacy {
             conn.execute_batch(COPY_V1_TO_V2).map_err(|e| e.to_string())?;
+            conn.execute_batch(BACKFILL_MODEL).map_err(|e| e.to_string())?;
         }
         conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).map_err(|e| e.to_string())
     };
@@ -405,8 +490,9 @@ pub fn record_event(
     );
 }
 
-/// A usage event: tokens in/out and cost for one task, with the details (cache, reasoning,
+/// A usage event: tokens in/out, cost and model for one task, with the details (cache, reasoning,
 /// cumulative session totals) as JSON in `detail`. Best effort like `record_event`.
+#[allow(clippy::too_many_arguments)]
 pub fn record_usage(
     conn: &Connection,
     task_id: &str,
@@ -415,12 +501,36 @@ pub fn record_usage(
     tokens_in: i64,
     tokens_out: i64,
     cost_usd: Option<f64>,
+    model: Option<&str>,
     detail: &str,
 ) {
     let _ = conn.execute(
-        "INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out, cost_usd) VALUES (?,?,?,'usage',?,?,?,?,?)",
-        rusqlite::params![now(), task_id, context_id, agent, detail, tokens_in, tokens_out, cost_usd],
+        "INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out, cost_usd, model) VALUES (?,?,?,'usage',?,?,?,?,?,?)",
+        rusqlite::params![now(), task_id, context_id, agent, detail, tokens_in, tokens_out, cost_usd, model],
     );
+}
+
+/// One usage event read from another tool's own log (not written by the dispatcher).
+pub struct SourcedUsage<'a> {
+    pub source: &'a str,
+    /// The tool's own id for the turn; (source, reference) is unique, so a rerun inserts nothing.
+    pub reference: &'a str,
+    pub ts: &'a str,
+    pub session: &'a str,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cost_usd: Option<f64>,
+    pub model: &'a str,
+    pub detail: &'a str,
+}
+
+/// Insert a usage event of another source; false when that (source, reference) is already stored.
+pub fn record_usage_from(conn: &Connection, u: &SourcedUsage) -> bool {
+    conn.execute(
+        "INSERT OR IGNORE INTO events (ts, task_id, kind, detail, tokens_in, tokens_out, cost_usd, model, source, ref) VALUES (?,?,'usage',?,?,?,?,?,?,?)",
+        rusqlite::params![u.ts, u.session, u.detail, u.tokens_in, u.tokens_out, u.cost_usd, u.model, u.source, u.reference],
+    )
+    .is_ok_and(|n| n > 0)
 }
 
 pub fn exists(conn: &Connection, sql: &str, params: &[&str]) -> bool {
@@ -447,5 +557,258 @@ mod tests {
         conn.execute("DROP TABLE events", []).unwrap();
         record_event(&conn, None, None, "x", None, None); // swallowed
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn temp_db(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("a2a-db-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("t.db");
+        (dir, path)
+    }
+
+    /// What a binary of schema 2 writes: no `model` column in the INSERT.
+    fn insert_old_style(conn: &Connection, kind: &str, detail: Option<&str>) {
+        conn.execute(
+            "INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out, cost_usd) VALUES (?,?,?,?,?,?,?,?,?)",
+            rusqlite::params![now(), "t1", "c1", kind, "build", detail, 10, 2, 0.5],
+        )
+        .unwrap();
+    }
+
+    fn model_of(conn: &Connection, detail: &str) -> Option<String> {
+        conn.query_row("SELECT model FROM events WHERE detail = ?", [detail], |r| r.get(0)).unwrap()
+    }
+
+    fn event_columns(conn: &Connection) -> Vec<String> {
+        let mut st = conn.prepare("PRAGMA table_info(events)").unwrap();
+        st.query_map([], |r| r.get::<_, String>(1)).unwrap().flatten().collect()
+    }
+
+    /// Turn a freshly created database into the schema-4 shape: no `sessions.backend`, version 4.
+    fn downgrade_to_v4(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("ALTER TABLE sessions DROP COLUMN backend; PRAGMA user_version = 4;").unwrap();
+    }
+
+    /// Turn a freshly created database into the schema-3 shape: no `source`, `ref`, ingest table, version 3.
+    fn downgrade_to_v3(path: &Path) {
+        downgrade_to_v4(path);
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "DROP INDEX idx_events_source_model; DROP INDEX idx_events_source_ref; DROP TABLE ingest_offsets;
+             ALTER TABLE events DROP COLUMN source; ALTER TABLE events DROP COLUMN ref; PRAGMA user_version = 3;",
+        )
+        .unwrap();
+    }
+
+    /// Turn a freshly created database into the schema-2 shape: no `model`, no index, version 2.
+    fn downgrade_to_v2(path: &Path) {
+        downgrade_to_v3(path);
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("DROP INDEX idx_events_model; ALTER TABLE events DROP COLUMN model; PRAGMA user_version = 2;").unwrap();
+    }
+
+    #[test]
+    fn a_fresh_database_has_the_model_column_index_and_version() {
+        let (dir, path) = temp_db("fresh");
+        let conn = open(&path).unwrap();
+        let version = user_version(&conn).unwrap();
+        let columns = event_columns(&conn);
+        let index = exists(&conn, "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?", &["idx_events_model"]);
+        insert_old_style(&conn, "usage", Some("old")); // an older binary's INSERT still works
+        let old_model = model_of(&conn, "old");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(version, 5);
+        assert!(columns.contains(&"model".to_string()), "{columns:?}");
+        assert!(index);
+        assert_eq!(old_model, None);
+    }
+
+    #[test]
+    fn record_usage_stores_the_model_in_its_column() {
+        let (dir, path) = temp_db("usage");
+        let conn = open(&path).unwrap();
+        record_usage(&conn, "t1", "c1", "build", 10, 2, Some(0.5), Some("openai/gpt-5.6-luna"), "{}");
+        record_usage(&conn, "t2", "c1", "build", 10, 2, None, None, "{}");
+        let models: Vec<Option<String>> = conn
+            .prepare("SELECT model FROM events WHERE kind = 'usage' ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(models, vec![Some("openai/gpt-5.6-luna".to_string()), None]);
+    }
+
+    #[test]
+    fn a_v2_database_gets_the_column_backfilled_from_detail_and_a_backup() {
+        let (dir, path) = temp_db("v2");
+        drop(open(&path).unwrap());
+        downgrade_to_v2(&path);
+        let raw = Connection::open(&path).unwrap();
+        insert_old_style(&raw, "usage", Some(r#"{"model":"a/known"}"#));
+        insert_old_style(&raw, "usage", Some(r#"{"cost":1}"#));
+        insert_old_style(&raw, "usage", Some("not json"));
+        insert_old_style(&raw, "usage", Some(r#"{"model":""}"#));
+        insert_old_style(&raw, "usage", Some(r#"{"model":7}"#));
+        insert_old_style(&raw, "nudge_delivered", Some(r#"{"model":"a/not-usage"}"#));
+        drop(raw);
+
+        let conn = open(&path).unwrap();
+        let got = [
+            model_of(&conn, r#"{"model":"a/known"}"#),
+            model_of(&conn, r#"{"cost":1}"#),
+            model_of(&conn, "not json"),
+            model_of(&conn, r#"{"model":""}"#),
+            model_of(&conn, r#"{"model":7}"#),
+            model_of(&conn, r#"{"model":"a/not-usage"}"#),
+        ];
+        let index = exists(&conn, "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?", &["idx_events_model"]);
+        let (version, rows) = (user_version(&conn).unwrap(), conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap());
+        let backup = path.with_extension("db.bak-v2").exists();
+        drop(conn);
+        let again = open(&path).unwrap(); // idempotent
+        let (version2, rows2) = (user_version(&again).unwrap(), again.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, [Some("a/known".to_string()), None, None, None, None, None]);
+        assert!(index && backup);
+        assert_eq!((version, rows, version2, rows2), (5, 6, 5, 6));
+    }
+
+    #[test]
+    fn a_v3_database_gets_source_and_ref_keeps_its_rows_and_is_backed_up_once() {
+        let (dir, path) = temp_db("v3");
+        drop(open(&path).unwrap());
+        downgrade_to_v3(&path);
+        let raw = Connection::open(&path).unwrap();
+        insert_old_style(&raw, "usage", Some("kept"));
+        drop(raw);
+        let conn = open(&path).unwrap();
+        let (version, columns) = (user_version(&conn).unwrap(), event_columns(&conn));
+        let source: Option<String> = conn.query_row("SELECT source FROM events WHERE detail = 'kept'", [], |r| r.get(0)).unwrap();
+        let indexes = ["idx_events_source_model", "idx_events_source_ref"]
+            .map(|i| exists(&conn, "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?", &[i]));
+        let offsets = table_exists(&conn, "ingest_offsets");
+        let backups = (path.with_extension("db.bak-v3").exists(), path.with_extension("db.bak-v2").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(version, 5);
+        assert!(columns.contains(&"source".to_string()) && columns.contains(&"ref".to_string()), "{columns:?}");
+        assert_eq!(source, None, "NULL source is read as opencode, not backfilled");
+        assert_eq!(indexes, [true, true]);
+        assert!(offsets);
+        assert_eq!(backups, (true, false));
+    }
+
+    #[test]
+    fn a_v4_database_gets_the_session_backend_column_keeps_its_rows_and_is_backed_up_once() {
+        let (dir, path) = temp_db("v4");
+        drop(open(&path).unwrap());
+        downgrade_to_v4(&path);
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "INSERT INTO agents (name, card, created_at, updated_at) VALUES ('mentor','{}','t','t');
+             INSERT INTO sessions (agent, directory, session_id, created_at) VALUES ('mentor','/p','ses_old','t');",
+        )
+        .unwrap();
+        drop(raw);
+        let conn = open(&path).unwrap();
+        let version = user_version(&conn).unwrap();
+        let backend: Option<String> = conn.query_row("SELECT backend FROM sessions WHERE session_id = 'ses_old'", [], |r| r.get(0)).unwrap();
+        let backups = (path.with_extension("db.bak-v4").exists(), path.with_extension("db.bak-v3").exists());
+        drop(conn);
+        let again = open(&path).unwrap(); // second open: no-op
+        let version2 = user_version(&again).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((version, version2), (5, 5));
+        assert_eq!(backend, None, "NULL backend is read as opencode, not backfilled");
+        assert_eq!(backups, (true, false));
+    }
+
+    #[test]
+    fn a_v2_database_goes_through_v3_to_v4_in_one_open() {
+        let (dir, path) = temp_db("v2to4");
+        drop(open(&path).unwrap());
+        downgrade_to_v2(&path);
+        let conn = open(&path).unwrap();
+        let (version, columns) = (user_version(&conn).unwrap(), event_columns(&conn));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(version, 5);
+        assert!(["model", "source", "ref"].iter().all(|c| columns.contains(&c.to_string())), "{columns:?}");
+    }
+
+    fn sourced<'a>(reference: &'a str, tokens_in: i64) -> SourcedUsage<'a> {
+        SourcedUsage { source: "claude-code", reference, ts: "2026-10-24T00:00:00.000Z", session: "s1", tokens_in, tokens_out: 1, cost_usd: None, model: "claude-sonnet-5-5", detail: "{}" }
+    }
+
+    #[test]
+    fn record_usage_from_is_unique_per_source_and_reference() {
+        let (dir, path) = temp_db("sourced");
+        let conn = open(&path).unwrap();
+        let (first, again, other) = (
+            record_usage_from(&conn, &sourced("m1", 5)),
+            record_usage_from(&conn, &sourced("m1", 9)),
+            record_usage_from(&conn, &SourcedUsage { source: "other", ..sourced("m1", 5) }),
+        );
+        record_usage(&conn, "t", "c", "build", 1, 1, None, None, "{}"); // NULL ref rows never collide
+        record_usage(&conn, "t", "c", "build", 1, 1, None, None, "{}");
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((first, again, other, rows), (true, false, true, 4));
+    }
+
+    #[test]
+    fn several_processes_opening_a_v2_file_at_once_migrate_it_once() {
+        let (dir, path) = temp_db("race");
+        drop(open(&path).unwrap());
+        downgrade_to_v2(&path);
+        let raw = Connection::open(&path).unwrap();
+        insert_old_style(&raw, "usage", Some(r#"{"model":"a/known"}"#));
+        drop(raw);
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || open(&p).map(|c| user_version(&c).unwrap()))
+            })
+            .collect();
+        let results: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        let conn = open(&path).unwrap();
+        let model = model_of(&conn, r#"{"model":"a/known"}"#);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(results.iter().all(|r| matches!(r, Ok(5))), "{results:?}");
+        assert_eq!(model.as_deref(), Some("a/known"));
+    }
+
+    #[test]
+    fn a_v1_database_is_upgraded_through_v2_to_v3_with_its_model_backfilled() {
+        let (dir, path) = temp_db("v1");
+        std::fs::create_dir_all(&dir).unwrap();
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch(
+            "CREATE TABLE agents (name TEXT PRIMARY KEY, card TEXT, updated_at TEXT);
+             CREATE TABLE tasks (id TEXT PRIMARY KEY, context_id TEXT, from_agent TEXT, to_agent TEXT, state TEXT, status_message TEXT,
+               history TEXT, artifacts TEXT, created_at TEXT, updated_at TEXT, requester_seen_at TEXT, directory TEXT, from_directory TEXT, from_session TEXT);
+             CREATE TABLE sessions (agent TEXT, directory TEXT, session_id TEXT, tmux_target TEXT, status TEXT, created_at TEXT);
+             CREATE TABLE nudges (key TEXT, task_id TEXT, context_id TEXT, target TEXT, kind TEXT, created_at TEXT);
+             CREATE TABLE hop_allow (context_id TEXT, grants INTEGER, notified_level INTEGER, last_continue_msg TEXT);
+             CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, task_id TEXT, context_id TEXT, kind TEXT, agent TEXT, detail TEXT,
+               tokens_in INTEGER, tokens_out INTEGER, cost_usd REAL);
+             INSERT INTO agents VALUES ('build', '{}', '2026-01-01T00:00:00.000Z');
+             INSERT INTO tasks VALUES ('t1', 'c1', 'build', 'build', 'completed', NULL, '[]', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:01.000Z', NULL, NULL, NULL, NULL);
+             INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out, cost_usd)
+               VALUES ('2026-01-01T00:00:01.000Z', 't1', 'c1', 'usage', 'build', '{\"model\":\"a/legacy\"}', 5, 1, NULL);",
+        )
+        .unwrap();
+        drop(raw);
+        let conn = open(&path).unwrap();
+        let (version, model, tasks) = (
+            user_version(&conn).unwrap(),
+            model_of(&conn, r#"{"model":"a/legacy"}"#),
+            conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0)).unwrap(),
+        );
+        let (bak1, bak2) = (path.with_extension("db.bak-v1").exists(), path.with_extension("db.bak-v2").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!((version, tasks, bak1, bak2), (5, 1, true, false));
+        assert_eq!(model.as_deref(), Some("a/legacy"));
     }
 }

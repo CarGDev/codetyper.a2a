@@ -155,6 +155,11 @@ pub fn kill_term(pid: u32) {
     let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
 }
 
+/// TERM a whole process group (`pid` leads it): a headless turn and the tools it started.
+pub fn kill_group_term(pid: u32) {
+    let _ = Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).status();
+}
+
 /// The dispatcher process is this binary run as `codetypera2a dispatcher`, or through the `oc`
 /// symlink as `oc dispatch` (the `oc` name hands every other word to opencode).
 pub fn is_dispatcher_command(cmd: &str) -> bool {

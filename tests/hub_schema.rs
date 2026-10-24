@@ -1,4 +1,4 @@
-//! The hub database migrates from the original (v1) schema to a2a_hub.dbml (v2) without losing rows.
+//! The hub database migrates from the original (v1) schema to a2a_hub.dbml (v5) without losing rows.
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -63,17 +63,26 @@ fn one(c: &rusqlite::Connection, sql: &str) -> String {
 }
 
 #[test]
-fn fresh_database_is_v2_with_every_table() {
+fn fresh_database_is_v5_with_every_table() {
     let d = tmp("fresh");
     let db = d.join("hub.db");
     open_via_oc(&db);
     let c = rusqlite::Connection::open(&db).unwrap();
-    assert_eq!(one(&c, "PRAGMA user_version"), "2");
+    assert_eq!(one(&c, "PRAGMA user_version"), "5");
     for t in ["agents", "contexts", "tasks", "sessions", "nudges", "hop_allow", "events"] {
         assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM sqlite_master WHERE name='{t}'")), "1", "{t}");
     }
     for col in ["version", "claimed_by", "parent_task_id", "priority"] {
         assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='{col}'")), "1", "{col}");
+    }
+    assert_eq!(one(&c, "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='backend'"), "1");
+    assert_eq!(one(&c, "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='model'"), "1");
+    assert_eq!(one(&c, "SELECT COUNT(*) FROM sqlite_master WHERE name='idx_events_model'"), "1");
+    for col in ["source", "ref"] {
+        assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='{col}'")), "1", "{col}");
+    }
+    for name in ["idx_events_source_model", "idx_events_source_ref", "ingest_offsets"] {
+        assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM sqlite_master WHERE name='{name}'")), "1", "{name}");
     }
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -86,7 +95,7 @@ fn v1_database_is_migrated_and_keeps_its_rows() {
     open_via_oc(&db);
     open_via_oc(&db); // idempotent
     let c = rusqlite::Connection::open(&db).unwrap();
-    assert_eq!(one(&c, "PRAGMA user_version"), "2");
+    assert_eq!(one(&c, "PRAGMA user_version"), "5");
     assert!(d.join("hub.db.bak-v1").exists(), "a backup of the v1 file is kept");
     assert_eq!(one(&c, "SELECT COUNT(*) FROM tasks"), "2");
     assert_eq!(one(&c, "SELECT history FROM tasks WHERE id='task-done-1'"), "[]", "invalid JSON is repaired");
@@ -99,6 +108,7 @@ fn v1_database_is_migrated_and_keeps_its_rows() {
     assert_eq!(one(&c, "SELECT COUNT(*) FROM nudges WHERE key='k3'"), "0", "orphan nudge dropped");
     assert_eq!(one(&c, "SELECT grants FROM hop_allow WHERE context_id='c1'"), "2");
     assert_eq!(one(&c, "SELECT COUNT(*) FROM events"), "1");
+    assert_eq!(one(&c, "SELECT model FROM events"), "NULL", "no usage event, no model");
     assert_eq!(one(&c, "SELECT COUNT(*) FROM pragma_foreign_key_check"), "0");
     let _ = std::fs::remove_dir_all(&d);
 }

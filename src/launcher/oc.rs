@@ -7,7 +7,7 @@
 //!   oc watch            follow the dispatcher log live (what the tmux `a2a-status` window runs)
 //!   oc status           dispatcher state, running sessions and open tasks
 //!   oc stop             stop the dispatcher
-//!   oc trace <task>     per-task event timeline;  oc stats  per-agent summary
+//!   oc trace <task>     per-task event timeline;  oc stats [--model]  per-agent / per-model summary
 //!   oc open-project <dir> [--prompt <text>]
 //!                       open <dir> in its own tmux tab running `oc`; with --prompt, hand the text to
 //!                       that tab's orchestrator
@@ -19,6 +19,8 @@
 //!                       the last opencode started through `oc` exits (A2A_KEEP_RUNNING=1 disables)
 //!   oc status --json [--dir <folder>]
 //!                       the same as JSON (tasks, questions, progress, today's cost) for the panel plugin
+//!   oc messages --json [--since <iso>] [--limit N]
+//!                       the latest task messages, newest first, read-only (for the Claude Code pane)
 //!   oc answer <task-id> <text>
 //!                       reply to a task that waits for you (input-required)
 //!   oc continue <ctx>   allow another DISPATCH_MAX_HOPS hops for a context that hit the hop cap
@@ -28,6 +30,7 @@
 //! the opencode session you already have open: the dispatcher switches that session to the
 //! assignee and back to the orchestrator; no session is ever created for an agent.
 //! Env: A2A_DB, OPENCODE_BIN, DISPATCH_MAX_HOPS
+use crate::dispatcher::backend;
 use crate::hub::db;
 use crate::{opencode, paths, sys};
 use std::process::{Command, Stdio};
@@ -57,11 +60,15 @@ COMMANDS:
   oc shutdown           cancel open tasks, stop running turns and the dispatcher (automatic when
                         the last opencode started with `oc` exits; --force ignores other opencodes)
   oc status --json      the same as JSON (tasks, questions, progress, today's cost); --dir <folder>
+  oc messages --json    the latest task messages, newest first; --since <iso>, --limit N (default 50)
   oc answer <task> <text>
                         reply to a task that waits for you (input-required)
   oc continue <ctx>     allow more hops for a context that hit the hop cap
   oc trace <task-id>    timeline of one task (id or 8-char prefix): events, offsets, duration
-  oc stats              per-agent summary: tasks, nudges, average duration, tokens/cost
+  oc stats [--model]    per-agent summary: tasks, nudges, average duration, tokens/cost;
+                        --model groups the same usage per model, one table per tool (opencode,
+                        claude code; reads new Claude Code transcripts first);
+                        --ingest only reads the Claude Code transcripts and prints the new rows
   oc help               this help
   oc version            print the version (also --version, -V)
 
@@ -272,7 +279,7 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
         return (0, Default::default());
     }
     // stop the turns that are running right now for those tasks (they would keep spending tokens)
-    let running = opencode::active_ids().unwrap_or_default();
+    let running = backend::running_everywhere();
     let mut stopped = std::collections::BTreeSet::new(); // sessions interrupted (once each)
     for t in &canceled {
         let Some(dir) = t.directory.as_deref().or(t.from_directory.as_deref()) else { continue };
@@ -281,7 +288,8 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
             if !running.contains(&r.session_id) || !stopped.insert(r.session_id.clone()) {
                 continue;
             }
-            match opencode::interrupt(&r.session_id) {
+            let Some(runtime) = backend::for_stored(r.backend.as_deref()) else { continue };
+            match runtime.interrupt(&r.session_id) {
                 Ok(()) => println!("interrupted {} (session {})", t.to_agent, r.session_id),
                 Err(e) => {
                     eprintln!("could not interrupt session {}: {e}", r.session_id);
@@ -347,10 +355,11 @@ fn shutdown() -> i32 {
     let (_, interrupted) = cancel_inner(&["--all".to_string(), "--yes".to_string()]);
     if let Ok(d) = db::open(&paths::db_path()) {
         // any other turn of a session this setup opened is still spending tokens
-        let running = opencode::active_ids().unwrap_or_default();
+        let running = backend::running_everywhere();
         for r in db::sessions(&d, "WHERE status = 'live'", &[]).unwrap_or_default() {
+            let Some(runtime) = backend::for_stored(r.backend.as_deref()) else { continue };
             if running.contains(&r.session_id) && !interrupted.contains(&r.session_id) {
-                match opencode::interrupt(&r.session_id) {
+                match runtime.interrupt(&r.session_id) {
                     Ok(()) => println!("interrupted {} (session {})", r.agent, r.session_id),
                     Err(e) => eprintln!("could not interrupt session {}: {e}", r.session_id),
                 }
@@ -417,6 +426,14 @@ fn run_opencode(args: &[String]) -> i32 {
 }
 
 pub fn run(args: &[String]) -> i32 {
+    // Claude Code's footer and hooks call this on every refresh: no heal, no output but the line.
+    if args.first().map(String::as_str) == Some("statusline") {
+        return super::statusline::run(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("follow") {
+        let Some(file) = args.get(1) else { die("usage: oc follow <log file>") };
+        return crate::dispatcher::claude_backend::follow(std::path::Path::new(file));
+    }
     let (cmd, arg) = (args.first().map(String::as_str), args.get(1).map(String::as_str));
     if !matches!(cmd, Some("help" | "--help" | "-h" | "version" | "--version" | "-V")) {
         if let Some(msg) = crate::cli::heal(&paths::config_dir(), &crate::cli::stable_exe()) {
@@ -487,10 +504,31 @@ pub fn run(args: &[String]) -> i32 {
         Some("stats") => {
             let d = ok(db::open(&paths::db_path()));
             let colour = std::io::IsTerminal::is_terminal(&std::io::stdout()) && std::env::var_os("NO_COLOR").is_none();
-            print!("{}", crate::stats_view::render(&ok(crate::trace::agent_stats(&d)), colour));
+            let by_model = args.iter().any(|a| a == "--model" || a == "--models");
+            if args.iter().any(|a| a == "--ingest") {
+                match crate::launcher::claude_usage::ingest(&d, &paths::claude_dir()) {
+                    Ok(n) => println!("claude code: {n} new usage rows"),
+                    Err(e) => die(&format!("stats --ingest: {e}")),
+                }
+                return 0;
+            }
+            // a failed ingest never breaks the stats: the rows stored so far are still shown
+            if by_model {
+                if let Err(e) = crate::launcher::claude_usage::ingest(&d, &paths::claude_dir()) {
+                    eprintln!("oc: warning: claude code usage not refreshed: {e}");
+                }
+            }
+            let table = match by_model {
+                true => crate::stats_view::render_models(&ok(crate::trace::model_stats(&d)), colour),
+                false => crate::stats_view::render(&ok(crate::trace::agent_stats(&d)), colour),
+            };
+            print!("{table}");
         }
         Some("status") if args.iter().any(|a| a == "--json") => {
             println!("{}", ok(crate::launcher::panel::status_json(&args[1..])));
+        }
+        Some("messages") if args.iter().any(|a| a == "--json") => {
+            println!("{}", ok(crate::launcher::panel::messages_json(&args[1..])));
         }
         Some("answer") => println!("{}", ok(crate::launcher::panel::answer(&args[1..]))),
         Some("status") => {
@@ -498,6 +536,10 @@ pub fn run(args: &[String]) -> i32 {
             println!("dispatcher: {}", if running { "running" } else { "not running" });
             if let Ok(ids) = opencode::active_ids() {
                 println!("sessions running a turn: {}", ids.len());
+            }
+            let claude_turns = backend::for_stored(Some("claude")).and_then(|b| b.active_ids().ok()).map_or(0, |ids| ids.len());
+            if claude_turns > 0 {
+                println!("claude turns running: {claude_turns}");
             }
             let d = ok(db::open(&paths::db_path()));
             let open = ok(db::tasks(

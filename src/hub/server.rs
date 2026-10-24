@@ -184,9 +184,11 @@ impl Hub {
             "INSERT INTO agents (name, card, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?) ON CONFLICT(name) DO UPDATE SET card = excluded.card, status = 'active', updated_at = excluded.updated_at",
             params![name, card.to_string(), ts, ts],
         ))?;
+        // A registration comes from an opencode session (backend NULL); the dispatcher's headless Claude
+        // sessions (`backend = 'claude'`) are its own and are never retired here.
         if let (Some(sid), Some(dir)) = (s(a, "sessionId"), s(a, "directory")) {
             Self::db_err(self.conn.execute(
-                "UPDATE sessions SET status='stale' WHERE agent=? AND directory=? AND session_id != ?",
+                "UPDATE sessions SET status='stale' WHERE agent=? AND directory=? AND session_id != ? AND backend IS NULL",
                 params![name, dir, sid],
             ))?;
             Self::db_err(self.conn.execute(

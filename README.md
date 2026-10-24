@@ -13,7 +13,7 @@
 
 <p>
 <a href="https://github.com/CarGDev/codetyper.a2a/releases"><img src="https://img.shields.io/github/v/release/CarGDev/codetyper.a2a?style=for-the-badge&label=release" alt="Latest release"></a>
-<img src="https://img.shields.io/badge/version-1.4.0-2ac3de?style=for-the-badge" alt="Version 1.4.0">
+<img src="https://img.shields.io/badge/version-2.0.0-2ac3de?style=for-the-badge" alt="Version 2.0.0">
 <img src="https://img.shields.io/badge/Rust-1.85%2B-f74c00?style=for-the-badge&logo=rust&logoColor=white" alt="Rust 1.85+">
 <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-7aa2f7?style=for-the-badge" alt="Platform">
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge" alt="License: Apache 2.0"></a>
@@ -79,7 +79,11 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 | `oc shutdown`          | end everything: cancel open tasks, interrupt running turns, retire sessions, stop the dispatcher (runs automatically when the last opencode exits; `A2A_KEEP_RUNNING=1` disables) |
 | `oc cancel`            | cancel open tasks (`--all`, task ids, `--context`, `--dir`) and interrupt the turns working on them |
 | `oc stats`             | coloured per-agent table, most tokens first, with a share bar: tasks, average duration (`3m 46s`), tokens in/out (`1.3M/13.1k`) and cost (opencode's figure, or an estimate from the price table when it reports 0); unknown values stay blank |
+| `oc stats --model`     | the same table per model, one titled table per tool (`opencode`, `claude code`), each with its own total (read from the `events.model` / `events.source` columns of the hub database, schema v4): tokens in/out, share bar, cost, turns, tasks and agents that used it; opencode events without a recorded model are grouped as `unknown`. It first reads new Claude Code transcripts (`$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/**/*.jsonl`) into the hub, once per message id, so reruns add nothing; tokens in include cache reads and writes, `tasks` are sessions and Claude Code cost is an estimate from the price table (blank for models it does not list). A transcript that cannot be read only prints a warning |
+| `oc stats --ingest`    | only the transcript step above: prints how many new `claude code` usage rows were added |
 | `oc status --json`     | the same state as JSON (tasks, questions, progress, today's cost); `--dir <folder>` |
+| `oc messages --json`   | recent task messages as JSON, newest first (`--since <iso>`, `--limit N`); what the Claude Code pane reads |
+| `oc follow <log>`      | render a Claude agent's live turn log (what its tmux window runs) |
 | `oc answer <task> <text>` | reply to a task that waits for you (`input-required`)           |
 | `oc agent <name>`      | switch this folder's newest session to another agent                |
 | `oc open-project <dir>` | open another project in its own tmux tab (`--prompt <text>` sends it to that orchestrator) |
@@ -95,6 +99,13 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 
 <p align="center">
   <img src="images/oc-stats.png" alt="oc stats: agents sorted by tokens, with share bars, cost and average duration" width="100%">
+</p>
+
+`oc stats --model` (alias `--models`) gives the same view per model, with one titled table per tool
+(`opencode`, `claude code`); this is the opencode table:
+
+<p align="center">
+  <img src="images/oc-stats-models.png" alt="oc stats --models: models sorted by tokens, with share bars, cost, turns, tasks and agents" width="100%">
 </p>
 
 a2a needs tmux (one tab per agent): `oc` refuses to start when tmux is not installed or the pane is not
@@ -163,6 +174,7 @@ Research's [harness2](https://github.com/google-research/harness2) and the
 
 - macOS or Linux (it uses `kill`, `ps`, symlinks and process groups; Windows is not supported).
 - [opencode](https://opencode.ai) v2 (developed against 2.0.32). Check with `opencode --version`.
+  Or [Claude Code](https://code.claude.com) (tested with 2.1.310): see [Claude Code](#claude-code) below.
 - A Rust toolchain (edition 2024, so Rust 1.85 or newer) to build it: `brew install rust` or
   [rustup](https://rustup.rs). SQLite is bundled, nothing else to install.
 - `tmux`: a2a opens one tab per agent and the live `a2a-status` window in tmux, so `oc` and the plugin
@@ -176,7 +188,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 1.4.0
+codetypera2a --version        # codetypera2a 2.0.0
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
@@ -219,6 +231,114 @@ PROTOCOL markdown and keeps your saved models. Useful options:
 `codegraph install`), `--no-link` skips the `oc` symlink, `--dir <path>` / `$OPENCODE_CONFIG_DIR`
 targets another config dir.
 
+### Claude Code
+
+`init` can set up [Claude Code](https://code.claude.com) too. On a terminal it opens a screen that lists
+the tools it knows, marks the ones it found and lets you pick (space toggles, `a` all, enter confirms,
+esc cancels); tools it cannot set up yet are listed as "coming soon":
+
+```text
+Which agents should codetypera2a configure?
+
+› ■ Claude Code (detected) — global only
+  ■ opencode (detected) — global only
+  □ Codex CLI (coming soon)
+  □ Cursor (coming soon)
+  ...
+```
+
+`codetypera2a init` is the one command: whatever you pick (or it detects with `--yes` or without a terminal; opencode
+when it finds none) is set up completely, with nothing left to run by hand. `--claude` or `--opencode` limit it to
+one tool and give the same result as picking only that tool on the screen; `--all` does both.
+
+| For Claude Code it installs               | Where                                                                 |
+| ----------------------------------------- | --------------------------------------------------------------------- |
+| the agents, converted (`agents/`)         | `~/.claude/agents/<name>.md` (model tier, tool list and color translated; `mode`, `steps` and `permission` have no Claude Code equivalent and are dropped) |
+| slash commands, converted (`commands/`)   | `~/.claude/commands/` (`/plan-new`, `/plan-continue`, `/plan-status`; opencode's `agent:` becomes "delegate to that subagent") |
+| MCP servers `a2a`, `codegraph`, `context7`, `engram`, `playwright` | `~/.claude.json` (`mcpServers`, the user scope `claude mcp add --scope user` writes; backup `~/.claude.json.bak-a2a`; existing entries are never overwritten, except that a dead `a2a` binary path is repaired) |
+| a footer status line and four hooks (`SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `SessionStart`) | `~/.claude/settings.json` (`statusLine`, `hooks`; backup `settings.json.bak-a2a`; only added when absent, your own status line and hooks are kept) |
+
+The footer reads like `a2a ● · 2 tasks: orchestrator>coder, coder>tester · 1 subagent: Explore`: whether the
+dispatcher is up, the hub tasks in flight (from/to) and the subagents Claude Code is running right now. It is
+`oc statusline`, a single fast line that reads the hub read-only and exits 0 whatever it is given; the two hooks
+run `oc statusline --hook start|stop`, which keep one small file per running subagent in
+`~/.config/opencode/a2a/statusline-subagents/` (entries older than 10 minutes are ignored). To turn it off, remove
+the `statusLine` key and the four `oc statusline` hooks from `settings.json`; `init` re-adds them on its next run
+unless you already have a status line of your own. A hook or status line of ours whose binary path is gone (the
+binary moved) is repaired on the next run; yours are never touched.
+
+**Re-running is safe and also an upgrade.** `init` remembers what it wrote in `<claude dir>/.a2a-manifest.json`. On a
+rerun a file that is missing is written, a file you did not edit is replaced when this release changed it, and a file
+you edited is kept and named in one line (`--force` replaces those too). Files from an install made before the manifest
+existed are replaced once, and the old copy is kept next to them as `<file>.bak-a2a`.
+An up-to-date install writes 0 files.
+
+It is the same source files as for opencode, so there is nothing extra to maintain. `--claude-dir <path>`
+or `$CLAUDE_CONFIG_DIR` target another config dir (its MCP file is then `<dir>/.claude.json`, which
+Claude Code reads when started with `CLAUDE_CONFIG_DIR=<dir>`). `codetypera2a update --claude` refreshes
+the converted markdown by the same rules.
+
+**Agents that work by themselves.** Start the dispatcher with `DISPATCH_BACKEND=claude` (all agents) or
+`DISPATCH_BACKEND_<AGENT>=claude` (one agent, name upper-cased, other characters `_`, e.g.
+`DISPATCH_BACKEND_CODE_REVIEWER=claude`); `CLAUDE_BIN` points at another `claude`. Without it nothing changes: opencode
+runs every agent. A task sent to such an agent runs one headless turn in the project folder
+(`claude -p --agent <name> --session-id <uuid>`, later `--resume <uuid>`, `--allowedTools` from the agent's `tools:`
+plus `mcp__a2a__*`), with the same rules as for opencode: one wake per task and status message, hop cap, retries,
+stall check. A failed turn (non-zero exit or an error result) fails the task with `agent_error:`, `oc cancel`
+stops a running turn, `oc status` shows `claude turns running`, and `oc stats --model` counts the turns from their
+transcripts (the dispatcher does not record them, so nothing is counted twice). Set
+`DISPATCH_BACKEND_ORCHESTRATOR=opencode` if your orchestrator runs in opencode while the rest runs in Claude Code.
+The `UserPromptSubmit` hook (`oc statusline --hook inbox`) adds the finished results to your next prompt in an
+interactive Claude Code session and marks them seen; set `A2A_REQUESTER` if your requester is not `orchestrator`.
+
+Check it: `claude agents` lists the agents, `claude mcp list` shows `a2a`, and
+`claude --agent orchestrator` starts on the orchestrator. Every agent also works as a subagent of any
+Claude Code session.
+
+Known limits:
+
+- An interactive Claude Code session is never woken by the dispatcher (a headless `claude -p` cannot inject into
+  it). Results reach it on its next prompt through the `UserPromptSubmit` hook and the `N results waiting`
+  part of the footer, so an orchestrator that must react the moment a task finishes still works best in opencode.
+- The opencode tabs plugin has no Claude Code version; the A2A pane below is the Claude Code counterpart of the
+  panels, and `oc status` and `oc watch` still work from a shell.
+- Agents run on Claude only when routed there (`DISPATCH_BACKEND` / `DISPATCH_BACKEND_<AGENT>`); the default stays opencode.
+- The `plan` agent and the `/plan-*` commands still look for plans in `.opencode/plans/`.
+
+#### The A2A pane (Claude Code)
+
+`init --claude` also writes a Claude Code "mod" (a plugin of function hooks, `plugins/claude-a2a/` in this repo,
+plugin name `a2a-pane`) into a local marketplace folder, `~/.claude/a2a-marketplace/` (or `<dir>/a2a-marketplace/`
+for `--claude-dir` / `$CLAUDE_CONFIG_DIR`). Once enabled it polls `oc status --json` and `oc messages --json` every
+4 seconds and shows:
+
+- the dispatcher dot, then one row per task (`? 1a2b3c4d orchestrator -> code-reviewer input-required`, coloured by
+  state) with the last three messages of that task under it;
+- for every task that waits for you, a highlighted "Waiting for you" block with the question, one button per numbered
+  option (press it to run `oc answer <task> <option>`), and an input to type your own answer;
+- `/a2a` opens or closes the pane.
+
+The pane docks beside the chat from about 110 to 144 columns; below that, or while it is closed, a one-line band
+above the prompt (`a2a ● 2 open · 1 waiting: 1a2b3c4d code-reviewer: Which branch?`) takes its place, and the footer
+status line is unchanged. In a terminal that is too narrow `/a2a` still opens it inline.
+
+`init` also runs `claude plugin marketplace add` and `claude plugin install a2a-pane@codetypera2a --scope user
+--config exe=<binary>` itself (against the same config dir: `CLAUDE_CONFIG_DIR` is passed to the child), skipping a
+step that is already done and running `claude plugin update` when the pane version changed. If `claude` is missing or a
+step fails, `init` prints one failure line with the exact commands and carries on. Restart Claude Code to see the pane.
+`exe` is the binary the mod runs (`<exe> oc status --json`); change it later in `/config` (plugin `a2a-pane`).
+
+**tmux.** Inside tmux, Claude Code behaves like opencode with its tabs plugin. A `SessionStart` hook
+(`oc statusline --hook ensure`) starts the dispatcher and opens the detached `a2a-status` window when a session
+starts; it prints nothing, returns at once and does nothing outside tmux. With `DISPATCH_BACKEND=claude`, each agent
+the dispatcher wakes also gets a tmux window named after it that follows the turn live (`oc follow`, fed by
+`<db>.claude-runs/<session>.log`); `DISPATCH_AUTO_OPEN=0` turns the windows off, and closing one never cancels the turn
+(`oc cancel` does).
+
+To remove the pane: `claude plugin uninstall a2a-pane@codetypera2a`, `claude plugin marketplace remove codetypera2a`,
+then delete `~/.claude/a2a-marketplace`. Remove the `SessionStart` hook from `settings.json` to stop the automatic
+dispatcher start.
+
 ### Companion tools (the other MCP servers `init` registers)
 
 `init` only writes their config; install the programs themselves if you want them connected:
@@ -241,7 +361,9 @@ rm -f ~/.cargo/bin/oc                  # the oc symlink, if init created it
 Then remove `mcp.servers.a2a` (and `default_agent` if you want your old one back; the previous file
 is saved as `opencode.jsonc.bak-a2a`) from `~/.config/opencode/opencode.jsonc`, the block between
 `# >>> a2a (codetypera2a) >>>` and `# <<< a2a (codetypera2a) <<<` from your shell rc, and the
-installed `~/.config/opencode/{a2a,plugins/a2a}` folders.
+installed `~/.config/opencode/{a2a,plugins/a2a}` folders. For Claude Code, remove the `a2a` entry (and the
+companions if you do not want them) from `mcpServers` in `~/.claude.json` (`claude mcp remove a2a --scope user`),
+the agent and command files `init` wrote to `~/.claude/{agents,commands}`, and the A2A pane (see its removal steps above).
 
 `init` (safe to re-run; existing files are skipped unless `--force`):
 
@@ -261,11 +383,15 @@ Use `--dir <path>` / `$OPENCODE_CONFIG_DIR` for another config dir, `--no-link` 
 ```
 agents/     agent templates installed by init
 commands/   slash commands installed by init
-plugins/    opencode TUI plugin (a2a tabs) installed by init
+plugins/    opencode TUI plugin (a2a tabs) installed by init; plugins/claude-a2a/ is the Claude Code pane mod
 a2a/        PROTOCOL.md (installed)
 src/hub/    MCP server (server.rs), SQLite state (db.rs), project identity, e2e test
 src/dispatcher/  wakes sessions through the opencode v2 API
 src/launcher/    `oc`
+src/targets/     install targets: mod.rs (Claude Code, opencode, coming-soon list, detection),
+                 convert.rs (opencode agent/command markdown to Claude Code), claude.rs (installer),
+                 settings.rs (status line and hooks), picker.rs (the `init` selection screen)
+src/stats_view.rs  `oc stats` and `oc stats --model` tables
 ```
 
 State: `~/.config/opencode/a2a/hub.db` (+ `.dispatcher.pid`, `.dispatcher.log`).

@@ -8,6 +8,7 @@ mod launcher;
 mod model_guard;
 mod models;
 mod stats_view;
+mod targets;
 mod opencode;
 mod paths;
 mod sys;

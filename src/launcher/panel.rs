@@ -3,7 +3,7 @@ use crate::hub::db::{self, TaskRow};
 use crate::{paths, sys};
 use serde_json::{Map, Value, json};
 
-const OPEN: [&str; 4] = ["submitted", "working", "input-required", "auth-required"];
+pub(crate) const OPEN: [&str; 4] = ["submitted", "working", "input-required", "auth-required"];
 
 /// The text of an A2A message (`{"parts":[{"text":..}]}`), parts joined by a newline.
 pub fn message_text(raw: &str) -> String {
@@ -51,7 +51,7 @@ pub fn status_json(args: &[String]) -> Result<Value, String> {
     let today = db::iso_ago_ms(86_400_000);
     let (tin, tout, cost): (i64, i64, f64) = d
         .query_row(
-            "SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), COALESCE(SUM(cost_usd),0.0) FROM events WHERE kind='usage' AND ts >= ?",
+            "SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), COALESCE(SUM(cost_usd),0.0) FROM events WHERE kind='usage' AND COALESCE(source,'opencode')='opencode' AND ts >= ?",
             [&today],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -63,6 +63,56 @@ pub fn status_json(args: &[String]) -> Result<Value, String> {
         "progress": { "done": done, "total": tasks.len() },
         "today": { "tokens_in": tin, "tokens_out": tout, "cost_usd": cost },
     }))
+}
+
+/// Longest message text `oc messages --json` returns; the pane draws a few lines, not whole reports.
+const MESSAGE_TEXT_MAX: usize = 600;
+const MESSAGES_DEFAULT_LIMIT: usize = 50;
+
+fn trimmed(text: &str) -> String {
+    let t = text.trim();
+    if t.chars().count() <= MESSAGE_TEXT_MAX {
+        return t.to_string();
+    }
+    let cut: String = t.chars().take(MESSAGE_TEXT_MAX).collect();
+    format!("{cut}...")
+}
+
+/// The other end of a message: the requester wrote it, so it goes to the assignee, and the reverse.
+fn counterpart<'a>(t: &'a TaskRow, from: &str) -> &'a str {
+    if from == t.from_agent { &t.to_agent } else { &t.from_agent }
+}
+
+/// Every history message of the most recently touched tasks, newest first, `since` (ISO) and `limit` applied.
+pub fn messages_of(d: &rusqlite::Connection, since: Option<&str>, limit: usize) -> Result<Vec<Value>, String> {
+    let tasks = db::tasks(d, "ORDER BY updated_at DESC LIMIT 200", &[])?;
+    let mut out: Vec<(String, Value)> = Vec::new();
+    for t in &tasks {
+        let history: Value = serde_json::from_str(&t.history).unwrap_or(Value::Null);
+        for m in history.as_array().into_iter().flatten() {
+            let ts = m["timestamp"].as_str().unwrap_or(&t.updated_at).to_string();
+            if since.is_some_and(|s| ts.as_str() < s) {
+                continue;
+            }
+            let from = m["from"].as_str().unwrap_or(&t.from_agent);
+            let text = trimmed(&message_text(&m.to_string()));
+            let msg = json!({
+                "task": t.id, "short": &t.id[..8.min(t.id.len())], "context": t.context_id,
+                "from": from, "to": counterpart(t, from), "state": t.state, "text": text, "ts": ts,
+            });
+            out.push((ts, msg));
+        }
+    }
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(out.into_iter().take(limit).map(|(_, m)| m).collect())
+}
+
+/// `oc messages --json [--since <iso>] [--limit N]`: the latest task messages, newest first, read-only.
+pub fn messages_json(args: &[String]) -> Result<Value, String> {
+    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+    let limit = flag("--limit").map_or(Ok(MESSAGES_DEFAULT_LIMIT), |v| v.parse().map_err(|_| format!("--limit needs a number, got {v}")))?;
+    let d = db::open(&paths::db_path())?;
+    Ok(json!({ "messages": messages_of(&d, flag("--since").map(String::as_str), limit)? }))
 }
 
 /// `oc answer <task-id> <text...>`: reply to a task waiting for the requester (what `a2a_send_message {taskId}` does).
@@ -100,5 +150,42 @@ mod tests {
         let m = r#"{"role":"agent","parts":[{"text":"a"},{"data":1},{"text":"b"}]}"#;
         assert_eq!(message_text(m), "a\nb");
         assert_eq!(message_text("not json"), "");
+    }
+
+    fn seeded() -> rusqlite::Connection {
+        let path = std::env::temp_dir().join(format!("a2a-messages-{}-{:?}.db", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_file(&path);
+        let d = db::open(&path).unwrap();
+        let ts = "2026-01-01T00:00:00.000Z";
+        for a in ["orchestrator", "code-reviewer"] {
+            d.execute("INSERT INTO agents (name, card, created_at, updated_at) VALUES (?, '{}', ?, ?)", [a, ts, ts]).unwrap();
+        }
+        d.execute("INSERT INTO contexts (id, state, created_at, updated_at) VALUES ('c1', 'working', ?, ?)", [ts, ts]).unwrap();
+        let history = r#"[{"role":"user","from":"orchestrator","parts":[{"text":"review src"}],"timestamp":"2026-01-01T00:00:01.000Z"},
+            {"role":"agent","from":"code-reviewer","parts":[{"text":"  which branch?  "}],"timestamp":"2026-01-01T00:00:02.000Z"}]"#;
+        d.execute(
+            "INSERT INTO tasks (id, context_id, from_agent, to_agent, state, history, created_at, updated_at) VALUES ('abcdef123456', 'c1', 'orchestrator', 'code-reviewer', 'input-required', ?, ?, ?)",
+            [history, ts, ts],
+        )
+        .unwrap();
+        d
+    }
+
+    #[test]
+    fn messages_come_newest_first_with_both_ends_and_trimmed_text() {
+        let m = messages_of(&seeded(), None, 10).unwrap();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0]["text"], "which branch?");
+        assert_eq!((m[0]["from"].as_str(), m[0]["to"].as_str()), (Some("code-reviewer"), Some("orchestrator")));
+        assert_eq!((m[0]["short"].as_str(), m[0]["state"].as_str()), (Some("abcdef12"), Some("input-required")));
+        assert_eq!(m[1]["to"], "code-reviewer");
+    }
+
+    #[test]
+    fn messages_honour_since_and_limit_and_cap_long_text() {
+        let d = seeded();
+        assert_eq!(messages_of(&d, Some("2026-01-01T00:00:02.000Z"), 10).unwrap().len(), 1);
+        assert_eq!(messages_of(&d, None, 1).unwrap().len(), 1);
+        assert!(trimmed(&"x".repeat(MESSAGE_TEXT_MAX + 50)).ends_with("..."));
     }
 }

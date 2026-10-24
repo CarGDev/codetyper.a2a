@@ -101,7 +101,22 @@ the requester. To go on, reply on that task with text containing `continue`, or 
 - `oc status` dispatcher + open tasks, `oc watch` live view, `oc dispatch` dispatcher in this pane,
   `oc stop`, `oc agent <name>` switch this folder's session to an agent, `oc continue <ctx>`.
 - `codetypera2a check-models` lints models against `a2a/model-policy.json`; `codetypera2a e2e-test`
-  runs the hub test (19 checks, two processes).
+  runs the hub test (22 checks, two processes).
+- `codetypera2a init --claude` installs the same agents and commands for Claude Code (see the README). There
+  the tools are named `mcp__a2a__<name>` (for example `mcp__a2a__send_message`) instead of `a2a_<name>`; the
+  hub and its semantics are the same. The dispatcher wakes an agent in Claude Code too: with
+  `DISPATCH_BACKEND=claude` (or `DISPATCH_BACKEND_<AGENT>=claude` for one agent; `CLAUDE_BIN` names the binary) a
+  task sent to it runs one headless turn, `claude -p --agent <name> --session-id <uuid>` the first time and
+  `--resume <uuid>` after, in the project folder, with `--allowedTools` taken from the agent's `tools:` line plus
+  `mcp__a2a__*`. The session is registered with `sessions.backend = 'claude'` (schema v5; NULL is opencode).
+  Rules are the same (one nudge per task and status message, hop cap, retry, stall check); a non-zero exit or an
+  `is_error` result fails the task with `agent_error:`. Usage is not recorded by the dispatcher for these turns:
+  `oc stats` reads the Claude Code transcripts. An interactive Claude Code session is never woken (a headless call
+  cannot inject into it): its results reach it through the `UserPromptSubmit` hook (`oc statusline --hook inbox`,
+  installed by `init --claude`), which adds the finished results (`A2A_REQUESTER`, default `orchestrator`) to the
+  next prompt and marks them seen, and through the footer (`N results waiting`). `oc cancel` stops a running turn.
+  An opencode orchestrator keeps working with `DISPATCH_BACKEND=claude` only if you also set
+  `DISPATCH_BACKEND_ORCHESTRATOR=opencode`.
 
 ## Fallback (if the `a2a_*` tools are not available)
 

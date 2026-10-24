@@ -1,6 +1,6 @@
 //! `oc stats`: one row per agent, biggest token user first, with a bar for its share of the tokens.
 //! A value that is not known stays blank instead of printing `n/a`.
-use crate::trace::{AgentStats, tok};
+use crate::trace::{AgentStats, ModelStats, tok};
 
 const BAR: usize = 20;
 const PALETTE: [u8; 6] = [111, 141, 80, 114, 179, 210];
@@ -137,6 +137,78 @@ pub fn render(stats: &[AgentStats], color: bool) -> String {
     out
 }
 
+const OPENCODE_NOTE: &str = "cost is opencode's figure when it charges, otherwise an estimate from the published price table";
+const CLAUDE_NOTE: &str = "tokens in include cache (input + cache creation + cache read); tasks are sessions; cost is an estimate from the published price table, blank for models it does not list";
+
+/// The tools `oc stats --model` knows, in print order: `(source, title, footnote)`.
+const SOURCES: [(&str, &str, &str); 2] = [("opencode", "opencode", OPENCODE_NOTE), ("claude-code", "claude code", CLAUDE_NOTE)];
+
+/// `oc stats --model`: the same table per model, one titled table per source (opencode, then claude code), each with
+/// its own total; sources without usage are left out. The name column grows to the longest model id.
+pub fn render_models(stats: &[ModelStats], color: bool) -> String {
+    let p = Paint(color);
+    let tables: Vec<String> = SOURCES
+        .iter()
+        .filter_map(|(source, title, note)| {
+            let rows: Vec<&ModelStats> = stats.iter().filter(|s| s.source == *source).collect();
+            (!rows.is_empty()).then(|| format!("{}\n{}", p.cell("1", title, 0, false), model_table(&rows, &p, note)))
+        })
+        .collect();
+    if tables.is_empty() {
+        return model_table(&[], &p, OPENCODE_NOTE);
+    }
+    tables.join("\n")
+}
+
+fn model_table(rows: &[&ModelStats], p: &Paint, note: &str) -> String {
+    let total = |s: &ModelStats| s.tokens_in + s.tokens_out;
+    let mut rows: Vec<&ModelStats> = rows.to_vec();
+    rows.sort_by(|a, b| total(b).cmp(&total(a)).then_with(|| a.model.cmp(&b.model)));
+    let top = rows.first().map_or(0, |s| total(s));
+    let width = rows.iter().map(|s| s.model.chars().count()).max().unwrap_or(0).max(20);
+    let head = |s: &str, w: usize, right: bool| p.cell("1;36", s, w, right);
+    let mut out = format!(
+        "{} {} {} {} {} {} {}\n",
+        head("model", width, false),
+        head("tokens in/out", 15, true),
+        head("share", BAR, false),
+        head("cost", 10, true),
+        head("turns", 5, true),
+        head("tasks", 5, true),
+        head("agents", 6, true),
+    );
+    if rows.is_empty() {
+        out.push_str(&p.cell("90", "no usage recorded yet", 0, false));
+        out.push('\n');
+        return out;
+    }
+    for s in &rows {
+        out.push_str(&format!(
+            "{} {} {} {} {} {} {}\n",
+            p.cell(&format!("1;{}", agent_code(&s.model)), &s.model, width, false),
+            p.cell("37", &tokens_cell(Some(s.tokens_in), Some(s.tokens_out)), 15, true),
+            bar_cell(p, total(s), top),
+            p.cell("33", &cost_cell(s.cost_usd), 10, true),
+            p.cell("90", &blank_zero(s.turns), 5, true),
+            p.cell("90", &blank_zero(s.tasks), 5, true),
+            p.cell("90", &blank_zero(s.agents), 6, true),
+        ));
+    }
+    // fold from +0.0: an empty f64 sum is -0.0 and printed as `~$-0.0000`
+    let cost = rows.iter().filter_map(|s| s.cost_usd).fold(0.0, |a, c| a + c);
+    out.push_str(&format!(
+        "{} {} {} {} {}\n",
+        p.cell("1", "total", width, false),
+        p.cell("1", &tokens_cell(Some(rows.iter().map(|s| s.tokens_in).sum()), Some(rows.iter().map(|s| s.tokens_out).sum())), 15, true),
+        " ".repeat(BAR),
+        p.cell("1;33", &cost_cell(Some(cost)), 10, true),
+        p.cell("1", &blank_zero(rows.iter().map(|s| s.turns).sum()), 5, true),
+    ));
+    out.push_str(&p.cell("90", note, 0, false));
+    out.push('\n');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +258,77 @@ mod tests {
     fn an_unpriced_total_is_zero_not_negative_zero() {
         let out = render(&[agent("a", Some(10), Some(1), None)], false);
         assert!(out.contains("~$0.0000") && !out.contains("-0.0"), "{out}");
+    }
+
+    fn model(name: &str, i: i64, o: i64, cost: Option<f64>) -> ModelStats {
+        ModelStats { source: "opencode".into(), model: name.into(), tokens_in: i, tokens_out: o, cost_usd: cost, turns: 2, tasks: 1, agents: 1 }
+    }
+
+    fn claude(name: &str, i: i64, o: i64) -> ModelStats {
+        ModelStats { source: "claude-code".into(), ..model(name, i, o, None) }
+    }
+
+    /// The table without its title line: what `oc stats --model` printed before the split by source.
+    fn without_title(out: &str) -> &str {
+        out.split_once('\n').unwrap().1
+    }
+
+    #[test]
+    fn each_source_gets_its_own_titled_table_with_its_own_total_and_footnote() {
+        let out = render_models(&[claude("claude-sonnet-5-5", 9_000, 100), model("big", 1_500_000, 2_000, Some(0.6)), model("small", 10, 1, None)], false);
+        let (oc, cc) = (out.find("opencode\n").unwrap(), out.find("claude code\n").unwrap());
+        assert!(oc < cc && out.starts_with("opencode\n"), "{out}");
+        let totals: Vec<&str> = out.lines().filter(|l| l.starts_with("total")).collect();
+        assert!(totals.len() == 2 && totals[0].contains("1.5M/2.0k") && totals[1].contains("9.0k/100"), "{out}");
+        assert!(out[..cc].contains("opencode's figure") && !out[..cc].contains("include cache"), "{out}");
+        assert!(out[cc..].contains("include cache") && !out[cc..].contains("opencode's figure"), "{out}");
+        assert!(!out[..cc].contains("claude-sonnet-5-5") && !out[cc..].contains("big"), "{out}");
+    }
+
+    #[test]
+    fn the_opencode_table_is_what_the_single_table_used_to_be() {
+        let rows = [model("small", 10, 1, None), model("big", 1_500_000, 2_000, Some(0.6))];
+        let with_claude = render_models(&[rows[0].clone(), rows[1].clone(), claude("c", 5, 5)], false);
+        let alone = render_models(&rows, false);
+        let table = without_title(&alone);
+        assert!(table.starts_with("model") && table.ends_with("published price table\n"), "{alone}");
+        assert!(without_title(&with_claude).starts_with(table), "{with_claude}");
+    }
+
+    #[test]
+    fn an_empty_source_is_skipped_and_only_claude_usage_prints_only_its_table() {
+        let out = render_models(&[claude("c", 5, 5)], false);
+        assert!(out.starts_with("claude code\n") && !out.contains("opencode") && !out.contains("no usage"), "{out}");
+    }
+
+    #[test]
+    fn models_are_listed_from_most_tokens_to_least_with_a_total() {
+        let out = render_models(&[model("small", 10, 1, None), model("big", 1_500_000, 2_000, Some(0.6)), model("unknown", 5, 0, None)], false);
+        let (big, small, unknown) = (out.find("big").unwrap(), out.find("small").unwrap(), out.find("unknown").unwrap());
+        assert!(big < small && small < unknown, "{out}");
+        assert!(out.contains(&"█".repeat(BAR)) && out.contains("~$0.6000"), "{out}");
+        assert!(out.lines().any(|l| l.starts_with("total") && l.contains("1.5M/2.0k")), "{out}");
+    }
+
+    #[test]
+    fn a_long_model_name_is_not_cut_and_columns_still_line_up() {
+        let long = "github-copilot/claude-sonnet-5.5-with-a-very-long-suffix";
+        let out = render_models(&[model(long, 100, 10, None), model("a", 1, 1, None)], false);
+        assert!(out.contains(long), "{out}");
+        let col: Vec<_> = out.lines().filter_map(|l| l.chars().position(|c| c == '█')).collect();
+        assert!(col.len() == 2 && col[0] == col[1], "{out}");
+    }
+
+    #[test]
+    fn models_without_usage_say_so() {
+        let out = render_models(&[], false);
+        assert!(out.starts_with("model") && out.contains("no usage recorded yet") && !out.contains("total"), "{out}");
+    }
+
+    #[test]
+    fn model_colour_is_only_added_when_asked_for() {
+        let s = [model("a", 10, 1, Some(0.1))];
+        assert!(!render_models(&s, false).contains('\x1b'));
+        assert!(render_models(&s, true).contains("\x1b["));
     }
 }

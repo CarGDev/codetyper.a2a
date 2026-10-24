@@ -6,6 +6,103 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-10-24
+
+The major version is for one breaking change: `codetypera2a init` is no longer opencode-only (see Changed).
+
+### Added
+
+- **A2A pane for Claude Code.** `oc messages --json [--since <iso>] [--limit N]` prints the latest task messages
+  (task, from, to, state, text, ts), newest first and read-only. The mod `a2a-pane` (`plugins/claude-a2a/`) polls it
+  with `oc status --json` and draws a pane beside the chat (dispatcher dot, tasks coloured by state with
+  `from -> to`, the last messages of each, a highlighted block for `input-required` questions with option buttons and
+  an input that run `oc answer`), a one-line band above the prompt when the pane is not placed, and `/a2a` to toggle
+  it. `init --claude` writes it to a local marketplace folder (`<claude dir>/a2a-marketplace/`) and enables it itself
+  by running `claude plugin marketplace add` and `claude plugin install a2a-pane@codetypera2a --scope user --config
+  exe=<binary>` (skipped when done, `claude plugin update` when the version changed, a failure is one line with the
+  manual commands).
+- **`init` is one command that finishes the job.** Plain `codetypera2a init` (screen, `--yes`, no terminal) gives
+  the same complete Claude Code setup as `init --claude`; `--claude` / `--opencode` only limit it. Reruns refresh
+  files the user did not edit through `<claude dir>/.a2a-manifest.json` (edited files are kept and named, `--force`
+  replaces them, files from an install made before the manifest are replaced once with the old copy kept as
+  `<file>.bak-a2a`, an up-to-date install writes 0 files) and repair our status line and hooks when the binary moved.
+- **Claude Code in tmux.** A `SessionStart` hook (`oc statusline --hook ensure`) starts the dispatcher and the
+  `a2a-status` window inside tmux (silent, detached, nothing outside tmux). Turns run by the Claude backend stream
+  `stream-json` into `<db>.claude-runs/<session>.log` and get a tmux window per agent that follows them (`oc follow`;
+  `DISPATCH_AUTO_OPEN=0` disables it; closing it never cancels the turn).
+- **Claude Code agents are woken by the dispatcher.** A `Backend` trait (`src/dispatcher/backend.rs`) separates the
+  dispatcher's rules from the runtime; `OpencodeBackend` is the unchanged default and `ClaudeBackend`
+  (`claude_backend.rs`) runs a headless `claude -p --agent <name>` turn per wake (`--session-id <uuid>` first,
+  `--resume` after, in the project folder, `--allowedTools` from the agent's `tools:` plus `mcp__a2a__*`, prompts
+  with `mcp__a2a__*` names). Choose with `DISPATCH_BACKEND` and `DISPATCH_BACKEND_<AGENT>`; `CLAUDE_BIN` overrides the
+  binary. A failed turn fails the task with `agent_error:`; `oc cancel` stops a running turn; `oc status` counts
+  Claude turns. The dispatcher records no usage for these turns (the transcript ingester already does). Database
+  schema v5 adds `sessions.backend` (NULL = opencode; backup `<db>.bak-v4`); the hub's `register_agent` no longer
+  retires a Claude session.
+- **Results for interactive Claude Code sessions.** `init --claude` adds a `UserPromptSubmit` hook
+  (`oc statusline --hook inbox`) that puts the requester's finished results into the next prompt (marking them seen)
+  and the footer shows `N results waiting`. Existing hooks are never overwritten.
+- **`oc stats --model` per tool, with Claude Code usage.** The table is now split into one titled table per source
+  (`opencode`, `claude code`), each with its own total and footnote; empty sources are skipped. Database schema v4
+  adds `events.source` (NULL, the dispatcher's rows, reads as opencode), `events.ref` (unique per source), their
+  indexes and an `ingest_offsets` table (backup `<db>.bak-v3`; a v2 file upgrades in one open). A new ingester
+  (`src/launcher/claude_usage.rs`) reads the Claude Code transcripts under `$CLAUDE_CONFIG_DIR` or `~/.claude`
+  (subagent transcripts too), one usage event per message id (the largest output wins when a message is streamed
+  over several lines), from the byte offset where the last run stopped, tolerating bad JSON, a half-written last
+  line and vanished files. Tokens in are input + cache creation + cache read; cost uses the price table and stays
+  blank for unlisted models. `oc stats --model` runs it first (a failure is a warning on stderr) and
+  `oc stats --ingest` runs only it and prints the new rows.
+- **Claude Code as an install target.** `codetypera2a init --claude` converts the embedded agent and slash-command
+  templates to Claude Code's format and installs them into `~/.claude` (21 agents in `agents/`, 3 commands in
+  `commands/`), then registers the MCP servers `a2a`, `codegraph`, `context7`, `engram` and `playwright` in the
+  user-scope MCP file (`~/.claude.json`, backed up first as `~/.claude.json.bak-a2a`). Existing entries are never
+  overwritten, except that a dead `a2a` binary path is repaired. The same source files feed both tools, so there
+  is nothing extra to maintain. `$CLAUDE_CONFIG_DIR` and `--claude-dir <path>` choose another config dir (its MCP
+  file is then `<dir>/.claude.json`). The converter maps the model to a tier (`sonnet`, `haiku`, `opus`; `gpt-*`
+  becomes `inherit`), `tools:` to Claude Code tool names (`a2a_*` becomes `mcp__a2a`) and the colour to a name
+  Claude Code accepts, and drops `mode` and `steps`.
+- **Target picker.** On a terminal, `init` opens a multi-select screen (detected tools are checked, tools it cannot
+  set up yet are listed as "coming soon": Codex CLI, Cursor, Gemini CLI, Kiro, VS Code Copilot Chat). New flags
+  `--claude`, `--opencode`, `--all` and `--yes` skip the screen. Code lives in `src/targets/` (`mod.rs`,
+  `convert.rs`, `claude.rs`, `picker.rs`).
+- **Claude Code footer status line.** `init --claude` also adds a `statusLine` and `SubagentStart` / `SubagentStop`
+  hooks to `settings.json` (only when absent, backup `settings.json.bak-a2a`, reruns change nothing). `oc statusline`
+  prints one line: dispatcher up/down, open hub tasks (from>to) and the subagents Claude Code is running, tracked by
+  `oc statusline --hook start|stop` in `<config>/a2a/statusline-subagents/` (`A2A_STATUSLINE_DIR` overrides; entries
+  older than 10 minutes are ignored). It reads the hub read-only and always exits 0. Code: `src/launcher/statusline.rs`,
+  `src/targets/settings.rs`.
+- `oc stats --model` (also `--models`): the usage table per model instead of per agent, with tokens in/out, a share
+  bar, cost, turns, tasks and agents that used each model. Events without a model are grouped as `unknown`. Plain
+  `oc stats` is unchanged.
+- **Database schema v3:** `events.model` is now a real column with the index `idx_events_model (kind, model)`, so
+  usage can be tracked and queried per model. The first run of a 2.0 binary migrates the hub database in one
+  transaction: it copies the file to `hub.db.bak-v2`, adds the column and fills it from the model saved in each
+  existing usage event (rows without one stay empty and show as `unknown`). The dispatcher writes the model into
+  the column (and still into `detail`). Older binaries keep working on a v3 file but do not fill the column;
+  `oc stats --model` still attributes those rows from `detail`.
+
+### Changed
+
+- **BREAKING:** `init` without flags shows the picker on a terminal. Without a terminal, or with `--yes`, it sets up
+  every tool it detects, which now includes Claude Code, instead of opencode only (opencode is still the fallback
+  when nothing is detected). Scripts that relied on the old behaviour should pass `--opencode`.
+- `update` and `init --md-only` still refresh only opencode's markdown; add `--claude` to refresh Claude Code's too.
+- Claude Code agents differ from opencode's in three ways: only the 3 `plan-*` commands are embedded, so only those
+  are converted; opencode's `permission.task` allow-list becomes `Agent(a, b)` in `tools:` (it limits an agent
+  started with `claude --agent`); and the codegraph, engram and context7 tools are always added to each agent's
+  `tools:`, because Claude Code gives an agent only the tools it lists.
+- `help` and the README describe both tools.
+
+### Known limits (Claude Code)
+
+- An interactive Claude Code session is never woken by the dispatcher (a headless `claude -p` cannot inject into it).
+  It gets results on its next prompt through the `UserPromptSubmit` hook and the `N results waiting` footer, so an
+  orchestrator that must react the moment a task finishes still works best in opencode.
+- Agents run on Claude only when you route them there (`DISPATCH_BACKEND` / `DISPATCH_BACKEND_<AGENT>`); the default
+  stays opencode.
+- The `plan` agent and the `/plan-*` commands still look for plans in `.opencode/plans/`.
+- Claude Code cost in `oc stats` is an estimate from the repo's price table (blank for models it does not list).
+
 ## [1.4.0] - 2026-10-23
 
 ### Fixed

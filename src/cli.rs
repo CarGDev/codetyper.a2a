@@ -3,24 +3,30 @@ use include_dir::{Dir, include_dir};
 use std::path::{Path, PathBuf};
 
 /// Agent templates, embedded at build time so install does not depend on the repo path.
-static AGENTS: Dir = include_dir!("$CARGO_MANIFEST_DIR/agents");
-static COMMANDS: Dir = include_dir!("$CARGO_MANIFEST_DIR/commands");
+pub(crate) static AGENTS: Dir = include_dir!("$CARGO_MANIFEST_DIR/agents");
+pub(crate) static COMMANDS: Dir = include_dir!("$CARGO_MANIFEST_DIR/commands");
 static PLUGINS: Dir = include_dir!("$CARGO_MANIFEST_DIR/plugins");
+/// The Claude Code pane mod (lives under `plugins/` but belongs to Claude Code, never to opencode).
+pub(crate) static CLAUDE_MOD: Dir = include_dir!("$CARGO_MANIFEST_DIR/plugins/claude-a2a");
+pub(crate) const CLAUDE_MOD_DIR: &str = "claude-a2a";
 static POLICY: &str = include_str!("../model-policy.json");
 static PROTOCOL: &str = include_str!("../a2a/PROTOCOL.md");
 
 pub const HELP: &str = "\
-codetypera2a - agent-to-agent hub for opencode
+codetypera2a - agent-to-agent hub for opencode and Claude Code
 
 USAGE:
   codetypera2a <command> [options]
 
 COMMANDS:
   version        Print the version (also --version, -V)
-  init           Install agents, slash commands, the tabs plugin, PROTOCOL.md + model policy
+  init           Set up the tools you pick (a screen on a terminal; --claude / --opencode / --all skip it).
+                 opencode: install agents, slash commands, the tabs plugin, PROTOCOL.md + model policy
                  into the opencode config dir and register the
                  MCP servers a2a, codegraph, context7, engram, playwright in opencode.jsonc
                  (opencode v2: mcp.servers; servers already configured are left alone)
+                 Claude Code: install the same agents and commands, converted to its format, in
+                 ~/.claude and register the same MCP servers in ~/.claude.json
   models         Choose each agent's model from the models opencode has (terminal UI);
                  --recommended applies the suggested ones, --show prints the table
   hub            Run the A2A hub (MCP server over stdio; register it in opencode.jsonc)
@@ -35,6 +41,13 @@ COMMANDS:
   help           Show this help
 
 INIT OPTIONS:
+  --claude       Set up Claude Code (agents, commands, MCP servers)
+  --opencode     Set up opencode
+  --all          Set up every tool init supports
+  --yes          Do not show the screen: set up the tools it finds (opencode when none)
+  --claude-dir <path>  Target Claude Code config dir
+                 (default: $CLAUDE_CONFIG_DIR, else ~/.claude; its MCP file is <dir>/.claude.json
+                 when CLAUDE_CONFIG_DIR is set, else ~/.claude.json)
   --dir <path>   Target opencode config dir
                  (default: $OPENCODE_CONFIG_DIR, else ~/.config/opencode)
   --shell        Add alias opencode='oc' to your shell rc (zsh/bash) so a bare `opencode`
@@ -80,7 +93,7 @@ fn embedded_files<'a>(dir: &'a Dir<'a>, out: &mut Vec<(PathBuf, &'a [u8])>) {
 }
 
 /// Write `contents` to `target` unless it exists (and `force` is off). Returns whether it wrote.
-fn install(target: &Path, contents: &[u8], force: bool) -> Result<bool, String> {
+pub(crate) fn install(target: &Path, contents: &[u8], force: bool) -> Result<bool, String> {
     if target.exists() && !force {
         return Ok(false);
     }
@@ -108,13 +121,13 @@ pub(crate) fn stable_exe() -> PathBuf {
 }
 
 /// First `name` found on PATH.
-fn which(name: &str) -> Option<PathBuf> {
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 /// The other MCP servers the setup expects next to `a2a` (opencode v2 shape). Only added when
 /// missing; local commands are resolved on PATH so a Homebrew or cargo install both work.
-fn default_mcp_servers() -> Vec<(&'static str, serde_json::Value)> {
+pub(crate) fn default_mcp_servers() -> Vec<(&'static str, serde_json::Value)> {
     use serde_json::json;
     let bin = |name: &str| which(name).map(|p| p.display().to_string()).unwrap_or_else(|| name.to_string());
     vec![
@@ -360,7 +373,63 @@ fn link_oc(exe: &Path) -> String {
     }
 }
 
+/// `init`: set up the chosen targets (the screen, the flags, or what is detected). The exit code is the worst one.
 pub fn init(args: &[String]) -> i32 {
+    use crate::targets::{self, Id, Plan, picker};
+    use std::io::IsTerminal;
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let probe = targets::Probe::system();
+    let ids = match targets::plan(&targets::Flags::from_args(args, tty), &targets::detected(&probe)) {
+        Plan::Run(ids) => ids,
+        Plan::Ask => match picker::pick(&probe) {
+            Ok(Some(ids)) => ids,
+            Ok(None) => {
+                println!("init: cancelled, nothing installed");
+                return 0;
+            }
+            Err(e) => {
+                eprintln!("init: {e}");
+                return 1;
+            }
+        },
+    };
+    if ids.is_empty() {
+        println!("init: nothing selected, nothing installed");
+        return 0;
+    }
+    type Setup = fn(&[String]) -> i32;
+    let runs: [(Id, Setup); 2] = [(Id::Opencode, init_opencode), (Id::Claude, init_claude)];
+    runs.iter().filter(|(id, _)| ids.contains(id)).map(|(_, run)| run(args)).max().unwrap_or(0)
+}
+
+/// The Claude Code half of `init`: converted agents and commands, plus the MCP servers.
+fn init_claude(args: &[String]) -> i32 {
+    use crate::targets::claude;
+    let dirs = match claude::dirs_from(args) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("init: claude: {e}");
+            return 2;
+        }
+    };
+    let opts = claude::Opts { force: args.iter().any(|a| a == "--force"), md_only: args.iter().any(|a| a == "--md-only") };
+    match claude::run(&dirs, &stable_exe(), &opts, &claude::real_runner(&dirs)) {
+        Ok(lines) => lines.iter().for_each(|l| println!("init: claude: {l}")),
+        Err(e) => {
+            eprintln!("init: claude: {e}");
+            return 1;
+        }
+    }
+    let custom_dir = args.iter().any(|a| a == "--claude-dir") && std::env::var_os("CLAUDE_CONFIG_DIR").is_none();
+    if custom_dir {
+        println!("init: claude: Claude Code only reads {} when you start it with CLAUDE_CONFIG_DIR={}", dirs.root.display(), dirs.root.display());
+    }
+    println!("init: claude: restart Claude Code; talk to an agent with `claude --agent orchestrator`; commands: /plan-new, /plan-continue, /plan-status");
+    println!("init: claude: the dispatcher does not wake Claude Code sessions yet, so agents that wait for another agent's result need opencode for now");
+    0
+}
+
+fn init_opencode(args: &[String]) -> i32 {
     let md_only = args.iter().any(|a| a == "--md-only");
     let force = md_only || args.iter().any(|a| a == "--force");
     let root = match config_dir(args) {
@@ -387,6 +456,7 @@ pub fn init(args: &[String]) -> i32 {
     );
     let mut plugin_files = Vec::new();
     embedded_files(&PLUGINS, &mut plugin_files);
+    plugin_files.retain(|(rel, _)| !rel.starts_with(CLAUDE_MOD_DIR));
     items.extend(plugin_files.into_iter().map(|(rel, bytes)| (root.join("plugins").join(rel), bytes)));
     items.push((root.join("a2a").join("model-policy.json"), POLICY.as_bytes()));
     items.push((root.join("a2a").join("PROTOCOL.md"), PROTOCOL.as_bytes()));
@@ -585,7 +655,7 @@ mod tests {
             r#"{"model":"x/y","mcp":{"servers":{"other":{"type":"local","command":["o"]}}}}"#,
         )
         .unwrap();
-        let a = vec!["--dir".to_string(), dir.display().to_string(), "--no-link".to_string(), "--no-models".to_string()];
+        let a = vec!["--opencode".to_string(), "--dir".to_string(), dir.display().to_string(), "--no-link".to_string(), "--no-models".to_string()];
         assert_eq!(init(&a), 0);
         let f = dir.join("agents/orchestrator.md");
         assert!(f.exists());
@@ -624,6 +694,30 @@ mod tests {
         assert_eq!(init(&md), 0);
         assert_ne!(std::fs::read_to_string(&f).unwrap(), "mine");
         assert_eq!(std::fs::read_to_string(&jsonc).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn init_sets_up_claude_code_in_its_own_dir_and_leaves_opencode_alone() {
+        let dir = std::env::temp_dir().join(format!("a2a-init-claude-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (claude_dir, opencode_dir) = (dir.join("claude"), dir.join("opencode"));
+        let a = vec!["--claude".to_string(), "--claude-dir".to_string(), claude_dir.display().to_string(), "--dir".to_string(), opencode_dir.display().to_string()];
+        assert_eq!(init(&a), 0);
+        assert!(claude_dir.join("agents/orchestrator.md").exists());
+        assert!(claude_dir.join("commands/plan-new.md").exists());
+        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap()).unwrap();
+        assert_eq!(cfg["mcpServers"]["a2a"]["args"][0], "hub");
+        assert_eq!(cfg["mcpServers"]["a2a"]["type"], "stdio");
+        for name in ["codegraph", "context7", "engram", "playwright"] {
+            assert!(cfg["mcpServers"][name].is_object(), "{name} missing");
+        }
+        assert!(!opencode_dir.exists(), "--claude must not touch the opencode dir");
+        // a second run keeps what is there
+        let before = std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap();
+        assert_eq!(init(&a), 0);
+        assert_eq!(std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

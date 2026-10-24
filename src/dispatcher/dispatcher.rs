@@ -22,15 +22,17 @@
 //!  - stall safety net (one retry, then fail the task)
 //!
 //! Env: A2A_DB, DISPATCH_POLL_MS (3000), DISPATCH_MAX_HOPS (40), DISPATCH_STALL_SECS (300),
-//!      DISPATCH_DRY_RUN=1 (log only), OPENCODE_BIN (opencode), A2A_DISPATCHER_PID (pidfile path)
+//!      DISPATCH_DRY_RUN=1 (log only), OPENCODE_BIN (opencode), A2A_DISPATCHER_PID (pidfile path),
+//!      DISPATCH_BACKEND (opencode | claude; default opencode), DISPATCH_BACKEND_<AGENT> (one agent's
+//!      backend; AGENT upper-case, every non-alphanumeric character `_`), CLAUDE_BIN (claude)
 use crate::hub::db::{self, TaskRow, iso_ago_ms, now, parse_ms};
 use crate::hub::project::{clear_project_cache, project_root, same_project};
+use super::backend::{self, Backend, SessionState};
 use crate::{opencode, paths, sys};
 use regex::Regex;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
-use std::collections::HashSet;
-use std::io::Write;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -43,7 +45,7 @@ fn e<E: ToString>(err: E) -> String {
 
 const WAKE_REQUESTER: [&str; 5] = ["input-required", "auth-required", "completed", "failed", "rejected"];
 
-fn log(msg: &str) {
+pub(super) fn log(msg: &str) {
     println!("{} {msg}", now());
 }
 
@@ -55,17 +57,58 @@ fn retry_delay_ms(attempt: i64, base_ms: u64) -> i64 {
     (base_ms as i64).saturating_mul(3_i64.saturating_pow((attempt - 1).max(0) as u32)).min(120_000.max(base_ms as i64))
 }
 
-/// opencode answers POST prompt/agent with 404 (SessionNotFound | LocationNotFound) for a session
-/// whose folder is gone, while GET still works: a session is only usable if its folder exists.
-fn usable(info: &opencode::SessionInfo) -> bool {
-    info.directory.is_empty() || std::path::Path::new(&info.directory).is_dir()
-}
-
-fn first_line(s: &str) -> &str {
+pub(super) fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }
 
+/// Which backend runs which agent: `DISPATCH_BACKEND` is the default, `DISPATCH_BACKEND_<AGENT>`
+/// overrides it for one agent. Names the dispatcher does not know are ignored.
+#[derive(Debug, PartialEq)]
+struct Choice {
+    default: &'static str,
+    per_agent: HashMap<String, &'static str>,
+}
+
+const DEFAULT_BACKEND: &str = "opencode";
+const BACKEND_VAR: &str = "DISPATCH_BACKEND";
+
+/// `mentor-2` -> `MENTOR_2`: how an agent name is spelled in an environment variable.
+fn env_key(agent: &str) -> String {
+    agent.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect()
+}
+
+fn known_backend(name: &str) -> Option<&'static str> {
+    backend::NAMES.iter().copied().find(|n| *n == name.trim())
+}
+
+impl Choice {
+    fn from_vars(vars: impl Iterator<Item = (String, String)>) -> Choice {
+        let (mut default, mut per_agent) = (DEFAULT_BACKEND, HashMap::new());
+        for (key, value) in vars {
+            let Some(name) = known_backend(&value) else { continue };
+            match key.strip_prefix(BACKEND_VAR) {
+                Some("") => default = name,
+                Some(agent) if agent.starts_with('_') => {
+                    per_agent.insert(agent[1..].to_ascii_uppercase(), name);
+                }
+                _ => {}
+            }
+        }
+        Choice { default, per_agent }
+    }
+
+    fn of(&self, agent: &str) -> &'static str {
+        self.per_agent.get(&env_key(agent)).copied().unwrap_or(self.default)
+    }
+
+    /// Every backend that has to be running.
+    fn used(&self) -> BTreeSet<&'static str> {
+        self.per_agent.values().copied().chain([self.default]).collect()
+    }
+}
+
 struct Cfg {
+    choice: Choice,
     poll_ms: u64,
     max_hops: i64,
     stall_secs: i64,
@@ -80,6 +123,7 @@ struct Cfg {
 impl Cfg {
     fn from_env() -> Self {
         Cfg {
+            choice: Choice::from_vars(std::env::vars()),
             poll_ms: paths::env_u64("DISPATCH_POLL_MS", 3000),
             max_hops: paths::env_u64("DISPATCH_MAX_HOPS", 40) as i64,
             stall_secs: paths::env_u64("DISPATCH_STALL_SECS", 300) as i64,
@@ -154,15 +198,25 @@ struct Dispatcher {
     conn: Connection,
     cfg: Cfg,
     active: (Option<Instant>, HashSet<String>),
+    backends: Vec<Box<dyn Backend>>,
 }
 
 impl Dispatcher {
+    /// The backend that runs `agent`'s sessions.
+    fn backend_for(&self, agent: &str) -> &dyn Backend {
+        let name = self.cfg.choice.of(agent);
+        self.backends.iter().find(|b| b.name() == name).unwrap_or(&self.backends[0]).as_ref()
+    }
+
+    /// Sessions running a turn in any backend in use (cached for 1.5 s). A backend that cannot be
+    /// asked keeps the previous answer.
     fn active_sessions(&mut self) -> HashSet<String> {
         if self.active.0.is_some_and(|at| at.elapsed() < Duration::from_millis(1500)) {
             return self.active.1.clone();
         }
-        match opencode::active_ids() {
-            Ok(ids) => self.active = (Some(Instant::now()), ids),
+        let asked: R<Vec<HashSet<String>>> = self.backends.iter().map(|b| b.active_ids()).collect();
+        match asked {
+            Ok(sets) => self.active = (Some(Instant::now()), sets.into_iter().flatten().collect()),
             Err(err) => log(&format!("active lookup failed: {}", first_line(&err))),
         }
         self.active.1.clone()
@@ -170,10 +224,12 @@ impl Dispatcher {
 
     /// The registered, still existing session of `agent` for the project of `dir`.
     fn agent_session(&self, agent: &str, dir: &str) -> R<Option<String>> {
+        let backend = self.backend_for(agent);
         let rows = db::sessions(&self.conn, "WHERE agent = ? AND status = 'live' ORDER BY created_at DESC", &[agent])?;
-        for r in rows.iter().filter(|r| r.directory == dir || same_project(dir, &r.directory)) {
-            let info = opencode::get(&r.session_id);
-            if info.as_ref().is_some_and(usable) {
+        let mine = rows.iter().filter(|r| r.backend.as_deref() == backend.stored_name());
+        for r in mine.filter(|r| r.directory == dir || same_project(dir, &r.directory)) {
+            let state = backend.session_state(&r.session_id, &r.directory);
+            if state == SessionState::Usable {
                 return Ok(Some(r.session_id.clone()));
             }
             self.conn
@@ -182,7 +238,7 @@ impl Dispatcher {
                     params![r.agent, r.directory, r.session_id],
                 )
                 .map_err(e)?;
-            let why = if info.is_some() { "its folder no longer exists" } else { "it no longer exists" };
+            let why = if state == SessionState::FolderGone { "its folder no longer exists" } else { "it no longer exists" };
             log(&format!("session {} for {agent}: {why}; marked stale", r.session_id));
         }
         Ok(None)
@@ -191,9 +247,10 @@ impl Dispatcher {
     /// Where a result goes: the session the task was sent from, else the requester's own
     /// registered session, else the newest session open in the folder.
     fn requester_session(&self, t: &TaskRow, directory: Option<&str>) -> R<Option<String>> {
+        let backend = self.backend_for(&t.from_agent);
         if let Some(id) = t.from_session.as_deref().filter(|s| !s.is_empty()) {
-            if opencode::get(id).as_ref().is_some_and(usable) {
-                return Ok(Some(id.to_string()));
+            if let Some(found) = backend.sent_from(id) {
+                return Ok(Some(found));
             }
             log(&format!("session {id} of task {} no longer exists or its folder is gone", &t.id[..8]));
         }
@@ -201,13 +258,7 @@ impl Dispatcher {
         if let Some(id) = self.agent_session(&t.from_agent, dir)? {
             return Ok(Some(id));
         }
-        let mut found = opencode::list(dir).into_iter().find(usable);
-        if found.is_none() {
-            if let Some(root) = project_root(dir).filter(|r| r != dir) {
-                found = opencode::list(&root).into_iter().find(usable);
-            }
-        }
-        Ok(found.map(|s| s.id))
+        Ok(backend.newest_in(dir))
     }
 
     /// The assignee's own session in this project; created (and shown as a tab) the first time.
@@ -223,13 +274,8 @@ impl Dispatcher {
         if !self.cfg.auto_open {
             return Err("opening sessions is disabled (DISPATCH_AUTO_OPEN=0)".into());
         }
-        let mut body = json!({ "title": format!("{agent} (a2a)"), "agent": agent, "location": { "directory": dir } });
-        // A session keeps its own model and ignores the agent's, so hand it the one opencode resolved
-        // for this agent (set with `codetypera2a models` or in the agent file).
-        if let Some(model) = opencode::agents(Some(dir)).ok().and_then(|l| l.into_iter().find(|a| a.id == agent)).and_then(|a| a.model) {
-            body["model"] = model;
-        }
-        let r = opencode::create_session(&body).map_err(|err| format!("session create failed: {}", first_line(&err)))?;
+        let backend = self.backend_for(agent);
+        let r = backend.create_session(agent, dir).map_err(|err| format!("session create failed: {}", first_line(&err)))?;
         let root = project_root(dir).unwrap_or_else(|| dir.to_string());
         self.conn
             .execute("UPDATE sessions SET status='stale' WHERE agent=? AND directory=?", params![agent, root])
@@ -237,55 +283,26 @@ impl Dispatcher {
         db::ensure_agent(&self.conn, agent).map_err(e)?;
         self.conn
             .execute(
-                "INSERT INTO sessions (agent, directory, session_id, tmux_target, created_at, last_seen_at) VALUES (?,?,?,?,?,?)",
-                params![agent, root, r, Option::<String>::None, now(), now()],
+                "INSERT INTO sessions (agent, directory, session_id, tmux_target, backend, created_at, last_seen_at) VALUES (?,?,?,?,?,?,?)",
+                params![agent, root, r, Option::<String>::None, backend.stored_name(), now(), now()],
             )
             .map_err(e)?;
         log(&format!("opened session {r} for {agent} in {root}"));
         Ok(r)
     }
 
-    /// Ask the opencode TUI plugin to show `session` as a tab (it tails tabs.jsonl).
-    fn request_tab(&self, session: &str, agent: &str, dir: &str) {
-        let line = json!({ "sessionID": session, "agent": agent, "directory": dir, "at": now() });
-        let path = opencode::tabs_file();
-        if let Err(err) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|mut f| writeln!(f, "{line}"))
-        {
-            log(&format!("could not write {}: {err}", path.display()));
-        }
-    }
-
     /// Wake `agent` in `session`: switch the session to it, then queue the prompt. `Ok(false)` =
     /// the session is mid-turn; try again on a later tick.
-    fn deliver(&mut self, session: &str, agent: &str, text: &str) -> R<bool> {
+    fn deliver(&mut self, session: &str, agent: &str, dir: Option<&str>, text: &str) -> R<bool> {
         if self.active_sessions().contains(session) {
             return Ok(false);
         }
-        let info = opencode::get(session).ok_or_else(|| format!("session {session} no longer exists"))?;
-        if info.agent.as_deref() != Some(agent) {
-            opencode::switch_agent(session, agent)?;
-        }
-        opencode::prompt(session, text)?;
-        Ok(true)
+        self.backend_for(agent).send(session, agent, dir, text)
     }
 
-    /// Valid assignee: any agent opencode knows (not only the installed template files). If the
-    /// opencode agent list cannot be read, give the benefit of the doubt: session create will say.
+    /// Valid assignee: a name of the right shape that the agent's backend knows.
     fn agent_known(&self, name: &str, dir: Option<&str>) -> bool {
-        if !Regex::new(r"^[A-Za-z0-9._-]+$").unwrap().is_match(name) {
-            return false;
-        }
-        if self.cfg.agent_dir.join(format!("{name}.md")).exists() {
-            return true;
-        }
-        match opencode::agents(dir) {
-            Ok(list) => list.iter().any(|a| a.id == name),
-            Err(_) => true,
-        }
+        Regex::new(r"^[A-Za-z0-9._-]+$").unwrap().is_match(name) && self.backend_for(name).agent_known(name, dir)
     }
 
     /// A task without a folder inherits the requester's stored folder, else its newest live session's.
@@ -490,7 +507,7 @@ impl Dispatcher {
             return self.post_system_message(
                 t,
                 "failed",
-                &format!("no_agent: opencode has no agent named \"{target}\" (see a2a_list_agents)."),
+                &format!("no_agent: {} has no agent named \"{target}\" (see a2a_list_agents).", self.backend_for(target).name()),
             );
         }
         // Claim before doing anything with side effects (opening a session, prompting it).
@@ -549,13 +566,13 @@ impl Dispatcher {
                 return Ok(());
             }
         };
-        let text = nudge_text(kind, t);
+        let text = nudge_text(kind, t, &self.backend_for(target).style());
         if self.cfg.dry {
             log(&format!("[dry] nudge {kind} -> {target} (session {session}) task {} state {}", &t.id[..8], t.state));
             self.finish_nudge(&key, "delivered", 0, None);
             return Ok(());
         }
-        match self.deliver(&session, target, &text) {
+        match self.deliver(&session, target, directory, &text) {
             Ok(true) => {
                 self.finish_nudge(&key, "delivered", 0, None);
                 if kind == "assignee" {
@@ -564,7 +581,7 @@ impl Dispatcher {
                 self.event(t, "nudge_delivered", target, kind);
                 log(&format!("nudge {kind} -> {target} (session {session}) task {} state {}", &t.id[..8], t.state));
                 if let (true, Some(d)) = (kind == "assignee", directory) {
-                    self.request_tab(&session, target, d);
+                    self.backend_for(target).request_tab(&session, target, d);
                 }
             }
             Ok(false) => {
@@ -607,7 +624,9 @@ impl Dispatcher {
     /// Remember the assignee session's cumulative usage when it is handed the task, so what it
     /// spends on the task can be told apart from what the (reused) session spent before.
     fn usage_baseline(&self, t: &TaskRow, agent: &str, session: &str) {
-        let Some(u) = opencode::usage(session) else { return };
+        // a backend without usage figures (Claude: the transcript ingester counts those turns)
+        // records no baseline, so nothing is settled for it either
+        let Some(u) = self.backend_for(agent).usage(session) else { return };
         let detail = json!({ "session": session, "cum": u.to_json(), "model": u.model }).to_string();
         db::record_event(&self.conn, Some(&t.id), Some(&t.context_id), "usage_baseline", Some(agent), Some(&detail));
     }
@@ -626,7 +645,7 @@ impl Dispatcher {
             .ok();
         let Some(prev) = prev.and_then(|d| serde_json::from_str::<Value>(&d).ok()) else { return };
         let Some(session) = prev["session"].as_str() else { return };
-        let Some(cur) = opencode::usage(session) else { return };
+        let Some(cur) = self.backend_for(&t.to_agent).usage(session) else { return };
         let delta = cur.since(&opencode::Usage::from_json(&prev["cum"], None));
         if delta.is_zero() && delta.cost == 0.0 {
             return;
@@ -646,6 +665,7 @@ impl Dispatcher {
             delta.input + delta.cache_read + delta.cache_write,
             delta.output + delta.reasoning,
             cost.map(|(c, _)| c),
+            cur.model.as_deref(),
             &detail,
         );
     }
@@ -692,7 +712,7 @@ impl Dispatcher {
         if active.contains(&session) {
             return Ok(None);
         }
-        Ok(opencode::failure_since(&session, parse_ms(since)))
+        Ok(self.backend_for(&t.to_agent).failure_since(&session, parse_ms(since)))
     }
 
     fn fail_for_agent_error(&self, t: &TaskRow, err: &str) -> R<()> {
@@ -741,7 +761,8 @@ impl Dispatcher {
                 }
                 self.event(&t, "stall_retry", &t.to_agent, &format!("{}s", age_s.round()));
                 if let (false, Some(s)) = (self.cfg.dry, &session) {
-                    if let Err(err) = self.deliver(s, &t.to_agent, &nudge_text("assignee", &t)) {
+                    let text = nudge_text("assignee", &t, &self.backend_for(&t.to_agent).style());
+                    if let Err(err) = self.deliver(s, &t.to_agent, t.directory.as_deref(), &text) {
                         log(&format!("retry failed: {}", first_line(&err)));
                     }
                 }
@@ -790,6 +811,31 @@ fn iso_after_ms(ms: i64) -> String {
 mod retry_tests {
     use super::*;
 
+    fn choice(vars: &[(&str, &str)]) -> Choice {
+        Choice::from_vars(vars.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+    }
+
+    #[test]
+    fn opencode_runs_every_agent_unless_told_otherwise() {
+        let c = choice(&[("PATH", "/bin"), ("DISPATCH_POLL_MS", "10")]);
+        assert_eq!((c.of("mentor"), c.of("any-agent"), c.used()), ("opencode", "opencode", BTreeSet::from(["opencode"])));
+    }
+
+    #[test]
+    fn the_default_and_the_per_agent_override_pick_the_backend() {
+        let c = choice(&[("DISPATCH_BACKEND", "claude"), ("DISPATCH_BACKEND_ORCHESTRATOR", "opencode"), ("DISPATCH_BACKEND_CODE_REVIEWER", " claude ")]);
+        assert_eq!((c.of("mentor"), c.of("orchestrator"), c.of("code-reviewer")), ("claude", "opencode", "claude"));
+        assert_eq!(c.used(), BTreeSet::from(["opencode", "claude"]));
+        let only = choice(&[("DISPATCH_BACKEND_CODE_REVIEWER", "claude")]);
+        assert_eq!((only.of("code-reviewer"), only.of("code.reviewer"), only.of("mentor")), ("claude", "claude", "opencode"));
+    }
+
+    #[test]
+    fn unknown_backends_and_lookalike_variables_are_ignored() {
+        let c = choice(&[("DISPATCH_BACKEND", "gpt"), ("DISPATCH_BACKENDX", "claude"), ("DISPATCH_BACKEND_MENTOR", "")]);
+        assert_eq!(c, choice(&[]));
+    }
+
     #[test]
     fn retries_back_off_and_are_capped() {
         let d: Vec<i64> = (1..=5).map(|a| retry_delay_ms(a, 5000)).collect();
@@ -819,17 +865,18 @@ fn status_text(t: &TaskRow) -> String {
         .unwrap_or_default()
 }
 
-fn nudge_text(kind: &str, t: &TaskRow) -> String {
+fn nudge_text(kind: &str, t: &TaskRow, style: &backend::Style) -> String {
+    let p = style.tool_prefix;
     if kind == "assignee" {
         let proj = t.directory.as_deref().map(|d| format!(" (project {d})")).unwrap_or_default();
         let dir = t.directory.as_deref().map(|d| format!(", directory:\"{d}\"")).unwrap_or_default();
         return format!(
-            "A2A: you are agent \"{to}\". Task {id} is waiting for you{proj}. Call a2a_inbox {{agent:\"{to}\"{dir}}}, claim the task with a2a_update_task state \"working\", do the work, then finish with a2a_update_task state completed | input-required | failed and put the deliverable in an artifact.",
-            to = t.to_agent, id = t.id
+            "A2A: you are agent \"{to}\". Task {id} is waiting for you{proj}. Call {p}inbox {{agent:\"{to}\"{dir}}}, claim the task with {p}update_task state \"working\", do the work, then finish with {p}update_task state completed | input-required | failed and put the deliverable in an artifact.{note}",
+            to = t.to_agent, id = t.id, note = style.assignee_note
         );
     }
     format!(
-        "A2A: task {id} that you sent to \"{to}\" is now {state}. Call a2a_get_task {{id:\"{id}\"}}, judge the result, then continue your plan, answer the question with a2a_send_message {{taskId}}, or ask the user if it needs their decision.",
+        "A2A: task {id} that you sent to \"{to}\" is now {state}. Call {p}get_task {{id:\"{id}\"}}, judge the result, then continue your plan, answer the question with {p}send_message {{taskId}}, or ask the user if it needs their decision.",
         id = t.id, to = t.to_agent, state = t.state
     )
 }
@@ -1028,7 +1075,8 @@ pub fn run() -> i32 {
             return 1;
         }
     };
-    let mut d = Dispatcher { conn, cfg, active: (None, HashSet::new()) };
+    let backends = backend::build(&cfg.choice.used());
+    let mut d = Dispatcher { conn, cfg, active: (None, HashSet::new()), backends };
     log(&format!(
         "dispatcher up: db={} poll={}ms maxHops={} stall={}s agents={}{}",
         db_path.display(), d.cfg.poll_ms, d.cfg.max_hops, d.cfg.stall_secs, d.cfg.agent_dir.display(),

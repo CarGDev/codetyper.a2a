@@ -50,3 +50,21 @@ pub fn dispatcher_pid_path() -> PathBuf {
 pub fn env_u64(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
+
+/// `$A2A_STATUSLINE_DIR`, else `<config>/a2a/statusline-subagents`: one file per subagent Claude Code is running.
+pub fn statusline_dir() -> PathBuf {
+    env_path("A2A_STATUSLINE_DIR").unwrap_or_else(|| a2a_dir().join("statusline-subagents"))
+}
+
+/// `$CLAUDE_CONFIG_DIR`, else `~/.claude`: where Claude Code keeps its transcripts under `projects/`.
+pub fn claude_dir() -> PathBuf {
+    env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| env_path("HOME").unwrap_or_else(|| PathBuf::from(".")).join(".claude"))
+}
+
+/// Where the Claude backend keeps one `<session>.json` (folder, started?) and `<session>.pid` per headless run:
+/// `<db>.claude-runs`. Files, not memory, because `oc cancel` is another process than the dispatcher.
+pub fn claude_runs_dir() -> PathBuf {
+    let mut p = db_path().into_os_string();
+    p.push(".claude-runs");
+    PathBuf::from(p)
+}

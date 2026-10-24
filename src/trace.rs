@@ -174,6 +174,51 @@ pub(crate) fn tok(n: i64) -> String {
     format!("{:.1}{suffix}", n as f64 / div)
 }
 
+/// One row of `oc stats --model`: everything the usage events recorded for one model.
+#[derive(Debug, Clone, Default)]
+pub struct ModelStats {
+    /// `opencode` (also the NULL `events.source` of the dispatcher's rows) or `claude-code`.
+    pub source: String,
+    pub model: String,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+    pub cost_usd: Option<f64>,
+    pub turns: i64,
+    pub tasks: i64,
+    pub agents: i64,
+}
+
+/// Usage events grouped by source and model; rows written before the `model` column existed (or by an
+/// older dispatcher) are attributed from their `detail` JSON, and rows with none are `unknown`.
+pub fn model_stats(conn: &Connection) -> Result<Vec<ModelStats>, String> {
+    let mut st = conn
+        .prepare(
+            "SELECT COALESCE(NULLIF(source, ''), 'opencode'),
+               COALESCE(NULLIF(model, ''), CASE WHEN json_valid(detail) THEN NULLIF(json_extract(detail, '$.model'), '') END, 'unknown'),
+               COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0), SUM(cost_usd),
+               COUNT(*), COUNT(DISTINCT task_id), COUNT(DISTINCT agent)
+             FROM events WHERE kind = 'usage' GROUP BY 1, 2 ORDER BY 1, 2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([], |r| {
+            Ok(ModelStats {
+                source: r.get(0)?,
+                model: r.get(1)?,
+                tokens_in: r.get(2)?,
+                tokens_out: r.get(3)?,
+                cost_usd: r.get(4)?,
+                turns: r.get(5)?,
+                tasks: r.get(6)?,
+                agents: r.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    Ok(rows)
+}
+
 pub fn format_stats(stats: &[AgentStats]) -> String {
     crate::stats_view::render(stats, false)
 }
@@ -258,5 +303,71 @@ mod tests {
     #[test]
     fn trace_without_events_says_so() {
         assert!(format_trace(&task(), &[]).contains("no events recorded"));
+    }
+
+    #[test]
+    fn model_stats_groups_usage_events_by_their_model() {
+        use crate::hub::db;
+        let dir = std::env::temp_dir().join(format!("a2a-trace-models-{}", std::process::id()));
+        let conn = db::open(&dir.join("t.db")).unwrap();
+        let sonnet = r#"{"model":"github-copilot/claude-sonnet-5.5"}"#;
+        let model = Some("github-copilot/claude-sonnet-5.5");
+        db::record_usage(&conn, "t1", "c", "build", 100, 10, Some(0.5), model, sonnet);
+        db::record_usage(&conn, "t1", "c", "build", 50, 5, None, model, sonnet);
+        db::record_usage(&conn, "t2", "c", "plan", 25, 2, Some(0.25), model, sonnet);
+        db::record_usage(&conn, "t3", "c", "mentor", 7, 1, None, None, r#"{"model":null}"#);
+        db::record_usage(&conn, "t4", "c", "mentor", 3, 1, None, None, "{}");
+        db::record_event(&conn, Some("t1"), Some("c"), "task_created", Some("build"), Some("x"));
+        let mut m = model_stats(&conn).unwrap();
+        m.sort_by(|a, b| a.model.cmp(&b.model));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(m.len(), 2, "{m:?}");
+        let (known, unknown) = (&m[0], &m[1]);
+        assert_eq!(known.model, "github-copilot/claude-sonnet-5.5");
+        assert_eq!((known.tokens_in, known.tokens_out, known.turns, known.tasks, known.agents), (175, 17, 3, 2, 2));
+        assert_eq!(known.cost_usd, Some(0.75));
+        assert_eq!(unknown.model, "unknown");
+        assert_eq!((unknown.tokens_in, unknown.turns, unknown.tasks, unknown.agents), (10, 2, 2, 1));
+        assert_eq!(unknown.cost_usd, None);
+    }
+
+    #[test]
+    fn model_stats_splits_by_source_and_reads_a_null_source_as_opencode() {
+        use crate::hub::db;
+        let dir = std::env::temp_dir().join(format!("a2a-trace-source-{}", std::process::id()));
+        let conn = db::open(&dir.join("t.db")).unwrap();
+        let m = Some("claude-sonnet-5-5");
+        db::record_usage(&conn, "t1", "c", "build", 100, 10, None, m, "{}"); // dispatcher row: NULL source
+        let claude = |reference, session| db::SourcedUsage { source: "claude-code", reference, ts: "t", session, tokens_in: 7, tokens_out: 1, cost_usd: Some(0.25), model: "claude-sonnet-5-5", detail: "{}" };
+        db::record_usage_from(&conn, &claude("m1", "s1"));
+        db::record_usage_from(&conn, &claude("m2", "s2"));
+        let got: Vec<(String, String, i64, i64, i64)> =
+            model_stats(&conn).unwrap().into_iter().map(|s| (s.source, s.model, s.tokens_in, s.turns, s.tasks)).collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(got, [("claude-code".into(), "claude-sonnet-5-5".into(), 14, 2, 2), ("opencode".into(), "claude-sonnet-5-5".into(), 100, 1, 1)]);
+    }
+
+    #[test]
+    fn model_stats_prefers_the_column_and_falls_back_to_detail_for_older_dispatcher_rows() {
+        use crate::hub::db;
+        let dir = std::env::temp_dir().join(format!("a2a-trace-fallback-{}", std::process::id()));
+        let conn = db::open(&dir.join("t.db")).unwrap();
+        db::record_usage(&conn, "t1", "c", "build", 100, 10, None, Some("a/column"), r#"{"model":"a/stale"}"#);
+        // a binary of schema 2 knows no `model` column
+        conn.execute(
+            "INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out) VALUES (?,?,?,'usage',?,?,?,?)",
+            rusqlite::params![db::now(), "t2", "c", "plan", r#"{"model":"a/detail"}"#, 5, 1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out) VALUES (?,?,?,'usage',?,?,?,?)",
+            rusqlite::params![db::now(), "t3", "c", "plan", "not json", 2, 1],
+        )
+        .unwrap();
+        let mut m = model_stats(&conn).unwrap();
+        m.sort_by(|a, b| a.model.cmp(&b.model));
+        let _ = std::fs::remove_dir_all(&dir);
+        let got: Vec<(&str, i64)> = m.iter().map(|s| (s.model.as_str(), s.tokens_in)).collect();
+        assert_eq!(got, vec![("a/column", 100), ("a/detail", 5), ("unknown", 2)]);
     }
 }

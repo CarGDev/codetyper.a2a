@@ -81,7 +81,7 @@ Launch independent subagent tasks with `background: true` so they run in a secon
 ### Report back (mandatory)
 
 When you work on an A2A task (an `A2A:` prompt, or a task from `a2a_inbox`), the task's `fromSession` is the orchestrator session that sent it. Always report back to it; never answer only in your own tab:
-- Finish with `a2a_update_task {id, agent, state:"completed"|"failed"|"input-required", text, artifact:{name, text}}` and put the deliverable in the artifact. The hub delivers it to `fromSession` and wakes the orchestrator there.
+- Finish with `a2a_update_task {id, agent, state:"completed"|"failed"|"input-required", text, artifact:{name, text}}` and put the deliverable in the artifact. The hub delivers it to `fromSession` and wakes the orchestrator there (in opencode; with the Claude backend the requester sees it on its next prompt, through the hook and the status line).
 - Blocked, or need a decision? Use `state:"input-required"` with numbered options in `text`, not a question in your own tab.
 - Never end your turn with the task still `working`: finish it, fail it, or ask.
 - If you delegate a sub-task, `a2a_send_message` it with your own name as `from` and `directory:"<your cwd>"`, then end your turn; its result comes back to your session.

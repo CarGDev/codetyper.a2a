@@ -7,8 +7,8 @@ Security fixes go into the latest release. Older releases are not patched; upgra
 
 | Version | Supported |
 | ------- | --------- |
-| latest release (currently 1.4.x) | yes |
-| older releases | no |
+| latest release (currently 2.0.x) | yes |
+| older releases (1.x and earlier) | no |
 
 ## Reporting a vulnerability
 
@@ -27,7 +27,9 @@ disclosure date with you (90 days at most unless it needs longer), release the f
 ## What is in scope
 
 - The hub, the dispatcher and the `oc` launcher: task handling, the SQLite database, process and tmux handling.
-- `init`, which writes into your opencode configuration (`opencode.jsonc`, agents, plugin, MCP entries).
+- `init`, which writes into your opencode configuration (`opencode.jsonc`, agents, plugin, MCP entries) and, with
+  `--claude`, into your Claude Code configuration (`~/.claude/agents`, `~/.claude/commands`, and the `mcpServers` of
+  `~/.claude.json`).
 - The agent templates in `agents/` (permissions that are wider than their role needs).
 - The opencode plugin in `plugins/a2a/`.
 
@@ -41,3 +43,20 @@ Out of scope: problems in opencode itself, in the model providers, or in the com
 - Task messages are stored in plain text in `~/.config/opencode/a2a/hub.db`. Never put secrets in them.
 - `init --force` and `models` rewrite files in your opencode config directory; a backup of
   `opencode.jsonc` is kept next to it (`opencode.jsonc.bak-a2a`, `opencode.jsonc.bak-a2a-models`).
+- `init --claude` edits `~/.claude.json` in place (or `<dir>/.claude.json` with `CLAUDE_CONFIG_DIR`) and writes
+  `.claude.json.bak-a2a` next to it first. Close Claude Code before running it, since Claude Code rewrites that file
+  too. Agents installed into `~/.claude/agents` run with your Claude Code permissions, like any subagent.
+- `init --claude` runs `claude plugin marketplace add <claude dir>/a2a-marketplace` and `claude plugin install
+  a2a-pane@codetypera2a` (and `update`) by itself, with `CLAUDE_CONFIG_DIR` set to the dir it writes to. The plugin is
+  the embedded pane mod, read from that local folder; it runs `<binary> oc status --json`, `oc messages --json` and, when you press an answer button, `oc answer`, and nothing else. The
+  `SessionStart` hook starts `oc ensure` (dispatcher and tmux status window) when a session starts inside tmux.
+  `init` records hashes of the files it wrote in `<claude dir>/.a2a-manifest.json` and replaces only files that still
+  match them (files from an install made before the manifest are replaced once; the old copy is kept as
+  `<file>.bak-a2a`).
+- With `DISPATCH_BACKEND=claude` the dispatcher starts `claude -p` for the agents you route to it. Those turns cannot
+  ask for permission, so they get only the tools of the agent's `tools:` line (`--allowedTools`) plus the hub's
+  `mcp__a2a__*`; an agent file without a `tools:` line gets Read, Grep, Glob, Edit, Write and Bash. Review the
+  `tools:` of an agent before routing it to Claude. The run state (`<db>.claude-runs/`) holds only session ids,
+  folders and pids.
+- The `UserPromptSubmit` hook reads the hub and, to mark results as seen, writes `tasks.requester_seen_at`; it adds
+  the last words of each finished task to your prompt, so treat agent output as untrusted text like any tool result.
