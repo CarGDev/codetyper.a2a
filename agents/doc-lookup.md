@@ -1,6 +1,8 @@
 ---
 description: Call to get a short, sourced answer from current library/framework/API documentation (Context7 first, then web). Read-only.
 mode: subagent
+color: "#f7768e"
+steps: 10
 model: github-copilot/claude-haiku-5.5
 tools:
   "a2a_*": true

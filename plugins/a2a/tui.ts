@@ -65,6 +65,22 @@ export default Plugin.define({
       // never break the TUI over this
     }
 
+    // The panels (sidebar table, banner, footer, sounds, /a2a-* commands) live in panels.tsx. They are
+    // loaded on their own so that a failure there (older opencode, missing JSX runtime) only costs
+    // the panels, never the tabs above or the cleanup below.
+    let disposePanels = () => {};
+    let closed = false;
+    import("./panels.tsx")
+      .then((m) => {
+        if (closed) return;
+        try {
+          disposePanels = m.install(context);
+        } catch {
+          // panels are optional
+        }
+      })
+      .catch(() => {});
+
     const file = tabsFile();
     // Only react to lines written after this TUI started.
     let offset = 0;
@@ -127,6 +143,12 @@ export default Plugin.define({
     const timer = setInterval(poll, 500);
     return () => {
       clearInterval(timer);
+      closed = true;
+      try {
+        disposePanels();
+      } catch {
+        // never break the exit
+      }
       // opencode is closing: cancel open tasks, stop running turns and the dispatcher, unless another
       // opencode is still running (A2A_KEEP_RUNNING=1 keeps everything)
       try {

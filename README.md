@@ -2,6 +2,10 @@
   <img src="images/a2a_banner.png" alt="codetyper.a2a banner" width="100%">
 </p>
 
+<p align="center">
+  <img src="images/a2a_logo.png" alt="codetyper.a2a logo" width="140">
+</p>
+
 # codetyper.a2a
 
 Agent-to-agent (A2A) hub for [opencode](https://opencode.ai) v2, in Rust. Each agent works in
@@ -9,7 +13,7 @@ its own session, shown as a tab in the opencode you already have open: an orches
 routes and delegates; a dispatcher wakes the right agent's tab and reports back to the
 orchestrator's. One binary, no Node.
 
-Current version: **1.3.3** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.4.0** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## How a task travels
 
@@ -55,7 +59,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 1.3.3
+codetypera2a --version        # codetypera2a 1.4.0
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
@@ -159,11 +163,27 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 | `oc trace <task>`      | timeline of one task (id or 8-character prefix): sender, claim, delivery, state changes, duration |
 | `oc shutdown`          | end everything: cancel open tasks, interrupt running turns, retire sessions, stop the dispatcher (runs automatically when the last opencode exits; `A2A_KEEP_RUNNING=1` disables) |
 | `oc cancel`            | cancel open tasks (`--all`, task ids, `--context`, `--dir`) and interrupt the turns working on them |
-| `oc stats`             | per-agent summary: tasks, deliveries, average duration, tokens in/out and cost (opencode's figure, or an estimate from the price table when it reports 0) |
+| `oc stats`             | coloured per-agent table, most tokens first, with a share bar: tasks, average duration (`3m 46s`), tokens in/out (`1.3M/13.1k`) and cost (opencode's figure, or an estimate from the price table when it reports 0); unknown values stay blank |
+| `oc status --json`     | the same state as JSON (tasks, questions, progress, today's cost); `--dir <folder>` |
+| `oc answer <task> <text>` | reply to a task that waits for you (`input-required`)           |
+| `oc agent <name>`      | switch this folder's newest session to another agent                |
+| `oc open-project <dir>` | open another project in its own tmux tab (`--prompt <text>` sends it to that orchestrator) |
+| `oc ensure`            | start the dispatcher and the status tab without starting opencode   |
+| `codetypera2a models`  | choose each agent's model (`--show`, `--recommended`)               |
+| `codetypera2a init --md-only` | refresh only the agent/command markdown (alias `codetypera2a update`) |
 | `codetypera2a eval`    | replay the deterministic scenarios (routing, hop cap, no duplicate nudges, seeded-bug reviewer); `--list` shows them |
 | `codetypera2a --version` | print the version (also `-V`, `version`; `oc --version` too)      |
 | `codetypera2a check-models` | lint models against `model-policy.json`                        |
 | `codetypera2a e2e-test`     | hub end-to-end test (also run by `cargo test`)                 |
+
+`oc stats` looks like this:
+
+<p align="center">
+  <img src="images/oc-stats.png" alt="oc stats: agents sorted by tokens, with share bars, cost and average duration" width="100%">
+</p>
+
+a2a needs tmux (one tab per agent): `oc` refuses to start when tmux is not installed or the pane is not
+inside it. opencode's own flags and plain subcommands (`models`, `run`, `--version`) still work without it.
 
 Protocol details: [`a2a/PROTOCOL.md`](a2a/PROTOCOL.md).
 
@@ -189,6 +209,10 @@ codetypera2a models                 # terminal UI: pick each agent's model from 
 codetypera2a models --recommended   # apply the suggestions below without the UI
 codetypera2a models --show          # print the table, change nothing
 ```
+
+<p align="center">
+  <img src="images/codetyepra2a-models.png" alt="codetypera2a models: choose each agent's model from the models opencode has" width="100%">
+</p>
 
 `init` offers the same screen at the end (skip with `--no-models`; without a terminal it only prints
 a hint). Keys: up/down move, `Enter` opens a filterable model list, `r` applies the recommendations,

@@ -3,3 +3,4 @@ hub.db*
 *.pid
 *.log
 *.dbml
+.*

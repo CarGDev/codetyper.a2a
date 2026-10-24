@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-23
+
+### Fixed
+
+- `oc stats` printed `~$-0.0000` for an unpriced total and `n/a` for free opencode models; the total is now `~$0.0000` and `-free` models count as $0.
+
+### Added
+
+- opencode panels (`plugins/a2a/panels.tsx`, loaded by the tabs plugin and optional): a sidebar task table with a progress bar and the hop-cap marker, a banner above the prompt when a task waits for you or a context hit the hop cap, a footer status (dispatcher, open tasks, today's cost and tokens), a system notification and sound when a task needs you, completes or fails, and the commands `/a2a-answer` (pick one of the numbered options of an `input-required` task), `/a2a-continue` and `/a2a-cancel`. Each agent has its own colour (`color:` in its file).
+- `oc status --json [--dir <folder>]` and `oc answer <task> <text>`: what the panels read and do.
+- `.update.sh <version>` checks the version, changelog and clean tree, then pushes master and the tag.
+- Executor agents (`code-debugger`, `test-case-generator`, `owasp-guardian`, `react-frontend-expert`, `typescript-mcp-expert`, `playwright-tester`, `api-design-architect`) get an "Act, don't deliberate" rule: start with the first concrete action and hand real design or tradeoff questions to `architect`, `mentor` or `brain` instead of deliberating in their own turn.
+- A dispatcher started through the `oc` launcher (`oc dispatch`) was not recognised as one, so its pidfile looked stale and a second dispatcher took over (two "dispatcher up" lines per start, tasks delivered twice, `oc status` blind to it). It is now recognised under both names.
+- The orchestrator told `plan` and `architect` to write plans under `~/.config/opencode/plans`, which they cannot write; plans now go in `.opencode/plans/<slug>/` of the project.
+- `git-historian` reported "access denied" for `git -C <dir>` and piped commands; it is told to run plain git commands, and `git shortlog` / `git rev-list` are allowed.
+- a2a needs tmux: `oc` (and the plugin's `oc ensure`) refuses to start the dispatcher and opencode when tmux is not installed or the pane is not inside tmux, and says what to do. opencode's own flags and plain subcommands (`models`, `run`, `--version`, ...) still run without it.
+- The sidebar progress bar is a solid filled bar over a thin rule with the count on the right (`██████──────  6.0 / 12`), instead of `[####----]`.
+- `plan` and `architect` may write to `~/.config/opencode/plans/<project>/<number>/` (Engram first, files when Engram is unavailable); the orchestrator uses that location and the small-chunks rule (work units of at most 400 changed lines).
+- `oc stats` and `oc trace` show token counts with `k`, `M` and `B` suffixes (`770.8k`, `2.3M`).
+- `codetypera2a init --md-only` (alias `codetypera2a update`) refreshes only the agent, command and PROTOCOL markdown; `opencode.jsonc`, MCP entries, the plugin and the models screen are left alone, and saved models are put back into the agent files.
+- `oc stats` prints a coloured table sorted from the agent that used the most tokens to the least, with a share bar per agent, red failure counts and a total row. Values that are not known are left blank instead of `n/a`. Colour is only used on a terminal (and not with `NO_COLOR`).
+- `models` and `init --force` now write the chosen model into the installed agent files too. opencode resolves an agent's model from its file before `opencode.jsonc`, so a model picked in `models` was ignored and the file's template model was used.
+- Delivery rule for every agent that writes files (the executors plus `software-architecture-expert` and `pr-commenter`) and for the orchestrator: work goes plan - design - task - implementation, and one task is at most 400 changed lines unless it is a migration that cannot be split. An agent that lacks the plan, design or task list asks for it with `input-required` instead of inventing it.
+- The orchestrator states plans as a table (agent, goal, depends on, done when, state, progress bar) and sends every A2A task in a fixed shape (GOAL, CONTEXT, SCOPE, STEPS, ACCEPTANCE, LIMITS, REPORT BACK) so the receiver can start without asking.
+- The orchestrator can call the read-only subagents `code-reviewer`, `doc-lookup`, `git-historian`, `security-scanner`, `summarizer` and `test-runner` through the Task tool (`permission.task` allowlist); the subagents get `steps` caps.
+
 ## [1.3.3] - 2026-10-23
 
 ### Fixed

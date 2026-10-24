@@ -1,6 +1,8 @@
 ---
 description: Call to scan given paths for OWASP Top 10 vulnerabilities and get a findings table with severity and remediation advice. Read-only.
 mode: subagent
+color: "#ff9e64"
+steps: 20
 model: github-copilot/claude-sonnet-5.5
 tools:
   "a2a_*": true

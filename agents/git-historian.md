@@ -1,6 +1,8 @@
 ---
 description: Call to learn the history of a file or symbol (who changed it, when, and why) using read-only git commands.
 mode: subagent
+color: "#7dcfff"
+steps: 10
 model: github-copilot/claude-haiku-5.5
 tools:
   "a2a_*": true
@@ -23,6 +25,8 @@ permission:
     "git blame*": allow
     "git ls-files*": allow
     "git rev-parse*": allow
+    "git shortlog*": allow
+    "git rev-list*": allow
     "ls*": allow
     "*|*": deny
     "*>*": deny
@@ -40,6 +44,7 @@ A file path or symbol name, optionally a question ("why was X changed?") and a r
 
 ## Allowed commands
 Only `git log`, `git blame`, `git show`, `git diff`, `git status` (and `git log -S/-G/-L` variants). Never run commit, checkout, switch, reset, stash, rebase, merge, pull, fetch, push, clean, or anything that mutates state. No non-git shell commands.
+Run git from the current folder as a plain command: no `git -C <dir>`, no pipes, `;`, `&&` or redirects (the shell denies them). For "most touched files" use `git log -n 5 --name-only --format=%h` or `git log -n 5 --stat`, and count the names yourself.
 
 ## Output (strict)
 ```

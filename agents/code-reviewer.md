@@ -1,6 +1,8 @@
 ---
 description: Call to review specific files or a diff for bugs, security issues, naming, comment quality, and logic errors. Read-only; reports issues, never fixes.
 mode: subagent
+color: "#e0af68"
+steps: 20
 model: github-copilot/gpt-6.1-sol
 tools:
   "a2a_*": true

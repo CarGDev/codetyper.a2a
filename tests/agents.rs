@@ -52,3 +52,18 @@ fn code_reviewer_may_use_the_browser_only_for_web_development() {
     assert!(section.contains("Never open a browser for anything else"), "must forbid it for other code");
     assert!(section.contains("view-only"), "must be view-only");
 }
+
+#[test]
+fn planners_may_write_plans_to_the_global_plans_folder() {
+    for name in ["plan", "architect"] {
+        let fm = frontmatter(name);
+        assert_eq!(fm.matches("\"~/.config/opencode/plans/*\": allow").count(), 3, "{name}: edit, write and external_directory");
+    }
+}
+
+#[test]
+fn orchestrator_names_the_plans_folder_and_the_chunk_limit() {
+    let text = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("agents").join("orchestrator.md")).unwrap();
+    assert!(text.contains("~/.config/opencode/plans/<project>/<number>/"));
+    assert!(text.contains("at most 400 changed lines"));
+}

@@ -17,6 +17,10 @@
 //!                       end this setup: cancel open tasks, interrupt running turns, retire the
 //!                       sessions, stop the dispatcher and close the status tab. Runs by itself when
 //!                       the last opencode started through `oc` exits (A2A_KEEP_RUNNING=1 disables)
+//!   oc status --json [--dir <folder>]
+//!                       the same as JSON (tasks, questions, progress, today's cost) for the panel plugin
+//!   oc answer <task-id> <text>
+//!                       reply to a task that waits for you (input-required)
 //!   oc continue <ctx>   allow another DISPATCH_MAX_HOPS hops for a context that hit the hop cap
 //!
 //! ONE dispatcher serves all projects (it reads the folder from each task). It is single-instance
@@ -52,6 +56,9 @@ COMMANDS:
                         --dir <folder>; --no-interrupt keeps running turns going; --yes skips asking
   oc shutdown           cancel open tasks, stop running turns and the dispatcher (automatic when
                         the last opencode started with `oc` exits; --force ignores other opencodes)
+  oc status --json      the same as JSON (tasks, questions, progress, today's cost); --dir <folder>
+  oc answer <task> <text>
+                        reply to a task that waits for you (input-required)
   oc continue <ctx>     allow more hops for a context that hit the hop cap
   oc trace <task-id>    timeline of one task (id or 8-char prefix): events, offsets, duration
   oc stats              per-agent summary: tasks, nudges, average duration, tokens/cost
@@ -126,7 +133,7 @@ fn watch() -> i32 {
 }
 
 /// Same rule as the dispatcher: agent-to-agent nudges against DISPATCH_MAX_HOPS * (1 + grants).
-fn hop_capped(d: &rusqlite::Connection, ctx: &str, max_hops: i64) -> bool {
+pub(crate) fn hop_capped(d: &rusqlite::Connection, ctx: &str, max_hops: i64) -> bool {
     let n: i64 = d
         .query_row("SELECT COUNT(*) FROM nudges WHERE context_id = ? AND kind IN ('assignee','requester') AND status IN ('claimed','delivered')", [ctx], |r| r.get(0))
         .unwrap_or(0);
@@ -358,10 +365,46 @@ fn shutdown() -> i32 {
     0
 }
 
+/// Subcommands that never open the TUI: they run as plain opencode, with or without tmux.
+const PLAIN_SUBCOMMANDS: &[&str] = &[
+    "upgrade", "update", "uninstall", "acp", "api", "debug", "auth", "mcp", "plugin", "models", "stats", "run", "session",
+    "service", "reload", "pair", "serve", "mini",
+];
+
+/// Why a2a cannot run here, `None` when tmux is installed and this pane is inside it.
+/// `A2A_NO_TMUX_CHECK=1` skips the check (the integration tests run without tmux).
+fn tmux_problem(in_pane: bool, installed: bool) -> Option<&'static str> {
+    if std::env::var("A2A_NO_TMUX_CHECK").as_deref() == Ok("1") {
+        return None;
+    }
+    if !installed {
+        return Some("tmux is not installed (a2a opens one tab per agent in tmux); install it, e.g. `brew install tmux`");
+    }
+    if !in_pane {
+        return Some("not inside tmux (a2a opens one tab per agent in tmux); start it with `tmux`, then run oc again");
+    }
+    None
+}
+
+/// opencode's own flags and plain subcommands do not need a2a, so they do not need tmux.
+fn needs_tmux(args: &[String]) -> bool {
+    let first = args.first().map(String::as_str).unwrap_or("");
+    let plain = first.starts_with('-') && !args.iter().any(|a| a == "-c" || a == "-s" || a == "--continue" || a == "--session");
+    !(plain || PLAIN_SUBCOMMANDS.contains(&first))
+}
+
 fn run_opencode(args: &[String]) -> i32 {
-    ensure_dispatcher();
+    let a2a = needs_tmux(args);
+    if a2a {
+        let in_pane = std::env::var("TMUX_PANE").is_ok_and(|p| !p.is_empty());
+        if let Some(why) = tmux_problem(in_pane, sys::tmux_ok(&["-V"])) {
+            eprintln!("oc: {why}");
+            return 1;
+        }
+        ensure_dispatcher();
+    }
     let me = std::process::id();
-    register_client(me);
+    a2a.then(|| register_client(me));
     let code = Command::new(opencode::bin())
         .args(args)
         .stdin(Stdio::inherit())
@@ -369,7 +412,7 @@ fn run_opencode(args: &[String]) -> i32 {
         .ok()
         .and_then(|s| s.code())
         .unwrap_or(1);
-    shutdown_if_last(me, false);
+    a2a.then(|| shutdown_if_last(me, false));
     code
 }
 
@@ -386,6 +429,11 @@ pub fn run(args: &[String]) -> i32 {
         Some("version" | "--version" | "-V") => println!("oc {}", env!("CARGO_PKG_VERSION")),
         // dispatcher + live status tab, without starting opencode (what the tabs plugin runs)
         Some("ensure") => {
+            let in_pane = std::env::var("TMUX_PANE").is_ok_and(|p| !p.is_empty());
+            if let Some(why) = tmux_problem(in_pane, sys::tmux_ok(&["-V"])) {
+                eprintln!("oc: {why}");
+                return 1;
+            }
             // `--client <pid>`: an opencode (the tabs plugin's TUI) that counts as running
             if let (Some("--client"), Some(pid)) = (arg, args.get(2).and_then(|p| p.parse::<u32>().ok())) {
                 register_client(pid);
@@ -438,8 +486,13 @@ pub fn run(args: &[String]) -> i32 {
         }
         Some("stats") => {
             let d = ok(db::open(&paths::db_path()));
-            print!("{}", crate::trace::format_stats(&ok(crate::trace::agent_stats(&d))));
+            let colour = std::io::IsTerminal::is_terminal(&std::io::stdout()) && std::env::var_os("NO_COLOR").is_none();
+            print!("{}", crate::stats_view::render(&ok(crate::trace::agent_stats(&d)), colour));
         }
+        Some("status") if args.iter().any(|a| a == "--json") => {
+            println!("{}", ok(crate::launcher::panel::status_json(&args[1..])));
+        }
+        Some("answer") => println!("{}", ok(crate::launcher::panel::answer(&args[1..]))),
         Some("status") => {
             let running = sys::dispatcher_pid(&paths::dispatcher_pid_path()).is_some();
             println!("dispatcher: {}", if running { "running" } else { "not running" });
@@ -466,4 +519,31 @@ pub fn run(args: &[String]) -> i32 {
         _ => return run_opencode(args),
     }
     0
+}
+
+#[cfg(test)]
+mod tmux_tests {
+    use super::{needs_tmux, tmux_problem};
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a2a_needs_tmux_installed_and_a_pane() {
+        assert!(tmux_problem(true, false).is_some_and(|m| m.contains("not installed")));
+        assert!(tmux_problem(false, true).is_some_and(|m| m.contains("not inside tmux")));
+        assert_eq!(tmux_problem(true, true), None);
+    }
+
+    #[test]
+    fn plain_opencode_commands_do_not_need_tmux() {
+        assert!(needs_tmux(&v(&[])));
+        assert!(needs_tmux(&v(&["/some/folder"])));
+        assert!(needs_tmux(&v(&["-c"])));
+        assert!(needs_tmux(&v(&["--session", "ses_1"])));
+        assert!(!needs_tmux(&v(&["models"])));
+        assert!(!needs_tmux(&v(&["run", "hi"])));
+        assert!(!needs_tmux(&v(&["--version"])));
+    }
 }

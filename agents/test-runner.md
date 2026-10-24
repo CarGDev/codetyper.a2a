@@ -1,6 +1,8 @@
 ---
 description: Call to run a project's test and/or lint scripts and get a compact pass/fail report with first failures. Does not install or modify anything.
 mode: subagent
+color: "#9ece6a"
+steps: 12
 model: github-copilot/claude-haiku-5.5
 tools:
   "a2a_*": true

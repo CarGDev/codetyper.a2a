@@ -44,6 +44,8 @@ INIT OPTIONS:
   --no-models    Skip the screen that sets each agent's model (run `codetypera2a models` later)
   --no-link      Do not create the `oc` symlink next to the binary
   --force        Overwrite files that already exist and replace the a2a MCP entry
+  --md-only      Refresh only the agent/command/PROTOCOL markdown (keeps opencode.jsonc, MCP entries,
+                 plugin and models; saved models are put back into the agent files). Also: `update`
                  (default: existing files are skipped)
 
 ENV:
@@ -359,7 +361,8 @@ fn link_oc(exe: &Path) -> String {
 }
 
 pub fn init(args: &[String]) -> i32 {
-    let force = args.iter().any(|a| a == "--force");
+    let md_only = args.iter().any(|a| a == "--md-only");
+    let force = md_only || args.iter().any(|a| a == "--force");
     let root = match config_dir(args) {
         Ok(d) => d,
         Err(e) => {
@@ -370,7 +373,7 @@ pub fn init(args: &[String]) -> i32 {
     let exe = stable_exe();
     // The opencode plugin reads this to find the binary (it may not be on opencode's PATH).
     let path_file = root.join("a2a").join("codetypera2a.path");
-    if let Err(e) = std::fs::create_dir_all(root.join("a2a")).and_then(|_| std::fs::write(&path_file, exe.display().to_string())) {
+    if let Err(e) = std::fs::create_dir_all(root.join("a2a")).and_then(|_| (!md_only).then(|| std::fs::write(&path_file, exe.display().to_string())).unwrap_or(Ok(()))) {
         eprintln!("init: cannot write {}: {e}", path_file.display());
     }
     let mut items: Vec<(PathBuf, &[u8])> = AGENTS
@@ -387,6 +390,10 @@ pub fn init(args: &[String]) -> i32 {
     items.extend(plugin_files.into_iter().map(|(rel, bytes)| (root.join("plugins").join(rel), bytes)));
     items.push((root.join("a2a").join("model-policy.json"), POLICY.as_bytes()));
     items.push((root.join("a2a").join("PROTOCOL.md"), PROTOCOL.as_bytes()));
+    if md_only {
+        let docs = [root.join("agents"), root.join("commands")];
+        items.retain(|(t, _)| t.extension().is_some_and(|e| e == "md") && (docs.iter().any(|d| t.starts_with(d)) || t.ends_with("PROTOCOL.md")));
+    }
     let (mut written, mut skipped) = (0, 0);
     for (target, contents) in items {
         match install(&target, contents, force) {
@@ -399,6 +406,12 @@ pub fn init(args: &[String]) -> i32 {
         }
     }
     println!("init: {written} file(s) installed, {skipped} skipped (exist; use --force) -> {}", root.display());
+    if md_only {
+        // the files carry the template models again: put back the ones saved in opencode.jsonc
+        let kept = crate::models::load_config(&root).map_or(0, |(cfg, _)| crate::models::sync_agent_files(&root, &crate::models::current_models(&cfg)));
+        println!("init: --md-only: only markdown refreshed; {kept} agent file(s) set back to the models saved in opencode.jsonc");
+        return 0;
+    }
     if args.iter().any(|a| a == "--tools") {
         run_tool_setups();
     }
@@ -411,6 +424,13 @@ pub fn init(args: &[String]) -> i32 {
     }
     if !args.iter().any(|a| a == "--no-link") {
         println!("init: {}", link_oc(&exe));
+    }
+    // --force put the template models back into the agent files: reapply the ones chosen before
+    if let Ok((cfg, _)) = crate::models::load_config(&root) {
+        let n = crate::models::sync_agent_files(&root, &crate::models::current_models(&cfg));
+        if n > 0 {
+            println!("init: {n} agent file(s) set to the models saved in opencode.jsonc");
+        }
     }
     if !args.iter().any(|a| a == "--no-models") {
         if let Some(note) = crate::models::availability_note(&root) {
@@ -573,6 +593,7 @@ mod tests {
         assert!(dir.join("a2a/PROTOCOL.md").exists());
         assert!(dir.join("commands/plan-new.md").exists());
         assert!(dir.join("plugins/a2a/tui.ts").exists());
+        assert!(dir.join("plugins/a2a/panels.tsx").exists() && dir.join("plugins/a2a/panel-logic.ts").exists());
         assert!(dir.join("a2a/codetypera2a.path").exists());
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
@@ -594,6 +615,15 @@ mod tests {
         forced.push("--force".into());
         assert_eq!(init(&forced), 0);
         assert_ne!(std::fs::read_to_string(&f).unwrap(), "mine");
+        // --md-only refreshes the markdown and leaves opencode.jsonc alone
+        let jsonc = dir.join("opencode.jsonc");
+        let before = std::fs::read_to_string(&jsonc).unwrap();
+        std::fs::write(&f, "mine").unwrap();
+        let mut md = a.clone();
+        md.push("--md-only".into());
+        assert_eq!(init(&md), 0);
+        assert_ne!(std::fs::read_to_string(&f).unwrap(), "mine");
+        assert_eq!(std::fs::read_to_string(&jsonc).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

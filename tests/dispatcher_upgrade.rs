@@ -38,6 +38,7 @@ impl Sandbox {
             ("A2A_DB", self.dir.join("hub.db")),
             ("A2A_DISPATCHER_PID", self.dir.join("d.pid")),
             ("OPENCODE_BIN", PathBuf::from("/usr/bin/false")),
+            ("A2A_NO_TMUX_CHECK", PathBuf::from("1")),
         ]
     }
 

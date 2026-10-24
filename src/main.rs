@@ -7,6 +7,7 @@ mod hub;
 mod launcher;
 mod model_guard;
 mod models;
+mod stats_view;
 mod opencode;
 mod paths;
 mod sys;
@@ -25,6 +26,7 @@ fn main() {
     let rest = args.get(1..).unwrap_or(&[]);
     let code = match args.first().map(String::as_str) {
         Some("init") => cli::init(rest),
+        Some("update") => cli::init(&[rest, &["--md-only".to_string()]].concat()),
         Some("hub") => hub::server::run(),
         Some("dispatcher") => dispatcher::dispatcher::run(),
         Some("oc") => launcher::oc::run(rest),

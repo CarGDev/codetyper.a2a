@@ -1,6 +1,8 @@
 ---
 description: Call to condense given files, logs, or command output into a short summary with key facts, errors, and open questions. Read-only.
 mode: subagent
+color: "#bb9af7"
+steps: 8
 model: github-copilot/claude-haiku-5.5
 tools:
   "a2a_*": true

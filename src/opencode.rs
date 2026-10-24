@@ -146,7 +146,12 @@ impl Usage {
         if self.cost > 0.0 {
             return Some((self.cost, false));
         }
-        let (pin, pout) = crate::models::price(self.model.as_deref()?)?;
+        let model = self.model.as_deref()?;
+        // opencode's free-tier models (`opencode/...-free`) cost nothing
+        if model.ends_with("-free") {
+            return Some((0.0, true));
+        }
+        let (pin, pout) = crate::models::price(model)?;
         let usd = (self.input as f64 * pin
             + self.cache_write as f64 * pin
             + self.cache_read as f64 * pin * 0.1
@@ -314,5 +319,7 @@ mod usage_tests {
         assert_eq!(u.cost_usd(), Some((0.25, false)));
         let unknown = Usage { input: 5, model: Some("x/unknown".into()), ..Default::default() };
         assert_eq!(unknown.cost_usd(), None);
+        let free = Usage { input: 9_000_000, model: Some("opencode/beam-free".into()), ..Default::default() };
+        assert_eq!(free.cost_usd(), Some((0.0, true)));
     }
 }

@@ -175,6 +175,36 @@ pub fn apply_models(cfg: &mut Value, changes: &BTreeMap<String, Option<String>>)
     }
 }
 
+/// `text` with the frontmatter `model:` line set to `model` (variant dropped); `None` when the file
+/// has no frontmatter model line or already names it.
+fn set_frontmatter_model(text: &str, model: &str) -> Option<String> {
+    let base = model.split('#').next().unwrap_or(model);
+    let rest = text.strip_prefix("---\n")?;
+    let end = rest.find("\n---")?;
+    let (fm, tail) = rest.split_at(end);
+    let line = fm.lines().find(|l| l.starts_with("model:"))?;
+    let new = format!("model: {base}");
+    if line.trim() == new {
+        return None;
+    }
+    Some(format!("---\n{}{tail}", fm.replacen(line, &new, 1)))
+}
+
+/// opencode takes an agent's model from its file before `opencode.jsonc`, so a model chosen here
+/// (or kept across `init --force`) has to be written into the installed agent file as well.
+/// Returns how many files changed.
+pub fn sync_agent_files(root: &Path, models: &BTreeMap<String, String>) -> usize {
+    models
+        .iter()
+        .filter_map(|(name, model)| {
+            let path = root.join("agents").join(format!("{name}.md"));
+            let text = std::fs::read_to_string(&path).ok()?;
+            let updated = set_frontmatter_model(&text, model)?;
+            std::fs::write(&path, updated).ok()
+        })
+        .count()
+}
+
 fn save_config(root: &Path, cfg: &Value) -> Result<PathBuf, String> {
     let path = root.join("opencode.jsonc");
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
@@ -200,8 +230,8 @@ pub struct AgentRow {
     pub unavailable: bool,
 }
 
-/// `(agent, description, model opencode resolved for it)`. The config override wins over the model
-/// from the agent file, as in opencode.
+/// `(agent, description, model opencode resolved for it)`. opencode takes the model from the agent
+/// file first, so `sync_agent_files` keeps the file in step with the config override.
 pub type AgentEntry = (String, String, Option<String>);
 
 pub fn build_rows(agents: Vec<AgentEntry>, current: &BTreeMap<String, String>, available: &[String]) -> Vec<AgentRow> {
@@ -545,10 +575,12 @@ fn commit(root: &Path, mut cfg: Value, strict: bool, rows: &[AgentRow]) -> Resul
         return Ok(());
     }
     let path = save_config(root, &cfg)?;
+    let synced = sync_agent_files(root, &current_models(&cfg));
     println!("models: {} agent model(s) saved in {} (backup: opencode.jsonc.bak-a2a-models)", changes.len(), path.display());
     for note in policy_violations(root, &changes) {
         println!("models: note: {note}");
     }
+    println!("models: {synced} agent file(s) updated too (opencode reads the model from the agent file first)");
     println!("models: restart opencode (or `opencode reload`); new agent sessions use these models");
     Ok(())
 }
@@ -622,6 +654,15 @@ pub fn run(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn frontmatter_model_is_replaced_in_place() {
+        let text = "---\ndescription: x\nmodel: github-copilot/claude-sonnet-5.5\nmode: subagent\n---\nbody model: keep\n";
+        let out = set_frontmatter_model(text, "openai/gpt-5.6-luna#max").unwrap();
+        assert_eq!(out, "---\ndescription: x\nmodel: openai/gpt-5.6-luna\nmode: subagent\n---\nbody model: keep\n");
+        assert_eq!(set_frontmatter_model(&out, "openai/gpt-5.6-luna"), None);
+        assert_eq!(set_frontmatter_model("no frontmatter", "a/b"), None);
+    }
+
     use super::*;
 
     fn avail(ids: &[&str]) -> Vec<String> {

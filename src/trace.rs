@@ -30,8 +30,8 @@ fn cost(e: &Event) -> String {
         (None, None, None) => "n/a".into(),
         (i, o, c) => format!(
             "{}/{} tok, {}",
-            i.map_or("n/a".into(), |v| v.to_string()),
-            o.map_or("n/a".into(), |v| v.to_string()),
+            i.map_or("n/a".into(), tok),
+            o.map_or("n/a".into(), tok),
             c.map_or("n/a".into(), |v| format!("${v:.4}"))
         ),
     }
@@ -163,59 +163,33 @@ pub fn agent_stats(conn: &Connection) -> Result<Vec<AgentStats>, String> {
     Ok(stats)
 }
 
-fn tok(n: i64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1e6)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1e3)
-    } else {
-        n.to_string()
-    }
-}
-
-fn usage_cell(i: Option<i64>, o: Option<i64>, c: Option<f64>) -> String {
-    let tokens = match (i, o) {
-        (None, None) => "n/a".to_string(),
-        (i, o) => format!("{}/{}", tok(i.unwrap_or(0)), tok(o.unwrap_or(0))),
+/// `999`, `1.5k`, `2.3M`, `4.0B`.
+pub(crate) fn tok(n: i64) -> String {
+    let (div, suffix) = match n.abs() {
+        1_000_000_000.. => (1e9, "B"),
+        1_000_000.. => (1e6, "M"),
+        1_000.. => (1e3, "k"),
+        _ => return n.to_string(),
     };
-    // cost is an estimate whenever opencode reports 0 (subscription providers): shown with `~`
-    format!("{tokens} {}", c.map_or("n/a".into(), |c| format!("~${c:.4}")))
+    format!("{:.1}{suffix}", n as f64 / div)
 }
 
 pub fn format_stats(stats: &[AgentStats]) -> String {
-    let mut out = format!(
-        "{:<20} {:>5} {:>5} {:>5} {:>9} {:>8} {:>10}  {}\n",
-        "agent", "recv", "done", "fail", "delivered", "released", "avg", "tokens in/out, cost"
-    );
-    for s in stats {
-        out.push_str(&format!(
-            "{:<20} {:>5} {:>5} {:>5} {:>9} {:>8} {:>10}  {}\n",
-            s.agent,
-            s.received,
-            s.completed,
-            s.failed,
-            s.delivered,
-            s.released,
-            s.avg_ms.map_or("n/a".into(), secs),
-            usage_cell(s.tokens_in, s.tokens_out, s.cost_usd)
-        ));
-    }
-    if stats.iter().any(|s| s.tokens_in.is_some() || s.tokens_out.is_some()) {
-        let sum = |f: fn(&AgentStats) -> Option<i64>| Some(stats.iter().filter_map(f).sum::<i64>());
-        let cost: f64 = stats.iter().filter_map(|s| s.cost_usd).sum();
-        out.push_str(&format!(
-            "{:<20} {:>5} {:>5} {:>5} {:>9} {:>8} {:>10}  {}\n",
-            "total", "", "", "", "", "", "",
-            usage_cell(sum(|s| s.tokens_in), sum(|s| s.tokens_out), Some(cost))
-        ));
-        out.push_str("(cost is opencode's figure when it charges, otherwise an estimate from the published price table)\n");
-    }
-    out
+    crate::stats_view::render(stats, false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_counts_get_k_m_b_suffixes() {
+        assert_eq!(tok(999), "999");
+        assert_eq!(tok(1_500), "1.5k");
+        assert_eq!(tok(770_800), "770.8k");
+        assert_eq!(tok(2_300_000), "2.3M");
+        assert_eq!(tok(4_000_000_000), "4.0B");
+    }
 
     fn task() -> TaskRow {
         TaskRow {
@@ -284,27 +258,5 @@ mod tests {
     #[test]
     fn trace_without_events_says_so() {
         assert!(format_trace(&task(), &[]).contains("no events recorded"));
-    }
-
-    #[test]
-    fn stats_table_has_na_for_unknown() {
-        let s = AgentStats {
-            agent: "mentor".into(),
-            received: 2,
-            completed: 1,
-            ..Default::default()
-        };
-        let out = format_stats(&[s]);
-        assert!(out.contains("mentor") && out.contains("n/a"), "{out}");
-    }
-
-    #[test]
-    fn stats_show_tokens_cost_and_a_total_row() {
-        let a = AgentStats { agent: "mentor".into(), tokens_in: Some(1_500_000), tokens_out: Some(2_000), cost_usd: Some(0.6), ..Default::default() };
-        let b = AgentStats { agent: "build".into(), tokens_in: Some(500), tokens_out: Some(100), cost_usd: None, ..Default::default() };
-        let out = format_stats(&[a, b]);
-        assert!(out.contains("1.5M/2.0k ~$0.6000"), "{out}");
-        assert!(out.contains("500/100 n/a"), "{out}");
-        assert!(out.contains("total") && out.contains("1.5M/2.1k"), "{out}");
     }
 }

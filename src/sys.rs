@@ -155,9 +155,15 @@ pub fn kill_term(pid: u32) {
     let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
 }
 
-/// The dispatcher process is this binary run as `<exe> dispatcher`.
+/// The dispatcher process is this binary run as `codetypera2a dispatcher`, or through the `oc`
+/// symlink as `oc dispatch` (the `oc` name hands every other word to opencode).
 pub fn is_dispatcher_command(cmd: &str) -> bool {
-    cmd.contains("codetypera2a") && cmd.contains("dispatcher")
+    if cmd.contains("codetypera2a") && cmd.contains("dispatcher") {
+        return true;
+    }
+    let mut words = cmd.split_whitespace();
+    let program = words.next().unwrap_or("");
+    program.rsplit('/').next() == Some("oc") && words.next() == Some("dispatch")
 }
 
 /// Short window-name suffix for a folder: basename, unsafe chars -> `_`, max 24 chars.
@@ -240,4 +246,18 @@ pub fn tmux_ensure_window(name: &str, cmd: &str) -> Result<Tab, String> {
         return Ok(Tab::AlreadyOpen);
     }
     tmux(&["new-window", "-d", "-t", &format!("{sess}:"), "-n", name, cmd]).map(|_| Tab::Created)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_dispatcher_command;
+
+    #[test]
+    fn dispatcher_is_recognised_under_both_names() {
+        assert!(is_dispatcher_command("/opt/homebrew/bin/codetypera2a dispatcher"));
+        assert!(is_dispatcher_command("/Users/me/.cargo/bin/oc dispatch"));
+        assert!(!is_dispatcher_command("/Users/me/.cargo/bin/oc status"));
+        assert!(!is_dispatcher_command("opencode dispatch"));
+        assert!(!is_dispatcher_command("/Users/me/.cargo/bin/codetypera2a hub"));
+    }
 }
