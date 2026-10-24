@@ -4,7 +4,7 @@ version = "1.4.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A2A hub, dispatcher and launcher for opencode v2 agents"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/CarGDev/codetyper.a2a"
 homepage = "https://github.com/CarGDev/codetyper.a2a"
 
