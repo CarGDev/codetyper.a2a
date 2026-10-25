@@ -838,7 +838,7 @@ fn fail(out: &mut impl Write, id: &Value, code: i64, message: &str) {
     let _ = out.flush();
 }
 
-fn handle(hub: &Hub, msg: &Value, out: &mut impl Write) {
+fn handle(hub: &Hub, msg: &Value, out: &mut impl Write, transport_identity: &CallerIdentity) {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let is_notification = id.is_null();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -861,7 +861,7 @@ fn handle(hub: &Hub, msg: &Value, out: &mut impl Write) {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let identity = resolver::CallerIdentity::from_mcp_meta(params.get("_meta"));
+            let identity = transport_identity.merge_mcp_meta(params.get("_meta"));
             match hub.call_with_identity(name, &args, &identity) {
                 None => reply(
                     out,
@@ -925,13 +925,14 @@ pub fn run() -> i32 {
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    let transport_identity = CallerIdentity::from_runtime_env();
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&hub, &msg, &mut out),
+            Ok(msg) => handle(&hub, &msg, &mut out, &transport_identity),
             Err(_) => fail(&mut out, &Value::Null, -32700, "parse error"),
         }
     }

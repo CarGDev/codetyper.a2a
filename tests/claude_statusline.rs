@@ -177,6 +177,15 @@ fn the_inbox_hook_adds_the_finished_results_of_this_folder_once() {
         !text.contains("bbbbbbbb") && !text.contains("cccccccc"),
         "other folders and running tasks stay out: {text}"
     );
+    let (other_folder, ok) = oc(
+        &dir,
+        &["statusline", "--hook", "inbox"],
+        r#"{"cwd":"/not-a-seeded-folder"}"#,
+    );
+    assert!(
+        ok && other_folder.trim().is_empty(),
+        "folder scoped: {other_folder:?}"
+    );
     let (again, ok) = oc(
         &dir,
         &["statusline", "--hook", "inbox"],

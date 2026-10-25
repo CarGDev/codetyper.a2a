@@ -1,6 +1,6 @@
 //! The dispatcher with `DISPATCH_BACKEND=claude`: a fake `claude` script stands in for the real one
 //! (its model calls cannot run in CI), records its arguments and answers through the hub like an agent.
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -69,6 +69,8 @@ impl Env {
             .env("OPENCODE_BIN", self.dir.join("opencode"))
             .env("CLAUDE_BIN", self.dir.join("claude-bin"))
             .env("CLAUDE_CONFIG_DIR", self.dir.join("claude"))
+            // The MCP child is target-owned; ordinary request fields are not identity.
+            .env("A2A_RUNTIME", "claude")
             .env("DISPATCH_BACKEND", "claude")
             .env("A2A_NO_DISPATCHER", "1")
             .env("DISPATCH_POLL_MS", "100")
@@ -118,6 +120,8 @@ impl Env {
             }
             None => {
                 cmd.env_remove("DISPATCH_BACKEND");
+                // Exercise the safe fallback separately from the marker-attributed path.
+                cmd.env_remove("A2A_RUNTIME");
             }
         }
         if let Some(value) = per_agent {
@@ -384,7 +388,7 @@ fn absent_identity_safely_selects_opencode_without_leaking_metadata() {
     let env = Env::new("safe-default");
     let task = env.hub_meta(
         "send_message",
-        json!({"from":"orchestrator","to":"mentor","text":"secret prompt","directory":env.project.display().to_string()}),
+        json!({"from":"orchestrator","to":"mentor","text":"secret prompt","runtime":"claude","backend":"claude","sessionId":"fake-unregistered","directory":env.project.display().to_string()}),
         json!({}),
         None,
         None,
@@ -396,6 +400,33 @@ fn absent_identity_safely_selects_opencode_without_leaking_metadata() {
     assert!(metadata[0].contains("safe-default"));
     assert!(metadata[0].contains("\"backend\":\"opencode\""));
     assert!(!metadata[0].contains("secret prompt"));
+    assert!(!metadata[0].contains("fake-unregistered"));
+}
+
+#[test]
+fn marker_attribution_ignores_spoofed_arguments_and_fake_session() {
+    let env = Env::new("spoof");
+    let task = env.hub_meta(
+        "send_message",
+        json!({
+            "from":"orchestrator", "to":"mentor", "text":"hi",
+            "runtime":"opencode", "backend":"opencode", "sessionId":"fake-unregistered",
+            "directory":env.project.display().to_string()
+        }),
+        json!({}),
+        Some("claude"),
+        None,
+    );
+    let context = task["contextId"].as_str().unwrap();
+    let metadata = env.rows(&format!(
+        "SELECT metadata FROM contexts WHERE id = '{context}'"
+    ));
+    assert!(metadata[0].contains("safe-default"), "{}", metadata[0]);
+    assert!(metadata[0].contains("\"backend\":\"opencode\""));
+    assert!(env
+        .rows("SELECT session_id FROM sessions WHERE session_id = 'fake-unregistered'")
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&env.dir);
 }
 
 fn tmux(server: &str, args: &[&str]) -> String {

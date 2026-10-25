@@ -49,6 +49,23 @@ pub enum CallerIdentity {
 }
 
 impl CallerIdentity {
+    /// Construct identity from the target-owned process marker. Ordinary request metadata must
+    /// never be used as a substitute for this boundary.
+    pub fn from_runtime_env() -> Self {
+        let Ok(runtime) = std::env::var("A2A_RUNTIME") else {
+            return Self::Unknown;
+        };
+        if runtime.len() > 32 || runtime.trim() != runtime {
+            return Self::Unknown;
+        }
+        let session_id = match std::env::var("A2A_SESSION_ID") {
+            Ok(value) if !value.is_empty() && value.len() <= 256 => Some(value),
+            Ok(_) => return Self::Unknown,
+            Err(_) => None,
+        };
+        Self::from_transport(Some(&runtime), session_id)
+    }
+
     pub fn from_transport(runtime: Option<&str>, session_id: Option<String>) -> Self {
         runtime
             .and_then(BackendKind::from_name)
@@ -90,6 +107,43 @@ impl CallerIdentity {
             runtimes.first().copied(),
             session_id.first().map(|s| (*s).to_owned()),
         )
+    }
+
+    /// Merge optional adapter metadata without allowing it to establish or replace identity.
+    pub fn merge_mcp_meta(&self, meta: Option<&Value>) -> Self {
+        let Some(Value::Object(values)) = meta else {
+            return self.clone();
+        };
+        if !["runtime", "backend", "client", "sessionId", "session_id"]
+            .iter()
+            .any(|key| values.contains_key(*key))
+        {
+            return self.clone();
+        }
+        let metadata = Self::from_mcp_meta(meta);
+        let Self::Known {
+            runtime,
+            session_id,
+        } = self
+        else {
+            return Self::Unknown;
+        };
+        let Self::Known {
+            runtime: metadata_runtime,
+            session_id: metadata_session,
+        } = metadata
+        else {
+            return Self::Unknown;
+        };
+        if runtime != &metadata_runtime
+            || session_id.is_some() && metadata_session.is_some() && session_id != &metadata_session
+        {
+            return Self::Unknown;
+        }
+        Self::Known {
+            runtime: *runtime,
+            session_id: session_id.clone().or(metadata_session),
+        }
     }
 
     fn runtime(&self) -> Option<BackendKind> {
@@ -290,5 +344,33 @@ mod tests {
             resolve_backend(value).caller_session.as_deref(),
             Some("explicit")
         );
+    }
+
+    #[test]
+    fn trusted_identity_rejects_conflicting_adapter_metadata() {
+        let identity = CallerIdentity::from_transport(Some("claude"), None);
+        assert_eq!(
+            identity.merge_mcp_meta(Some(&serde_json::json!({"runtime": "claude"}))),
+            identity
+        );
+        assert_eq!(
+            identity.merge_mcp_meta(Some(&serde_json::json!({"runtime": "opencode"}))),
+            CallerIdentity::Unknown
+        );
+        assert_eq!(
+            CallerIdentity::Unknown.merge_mcp_meta(Some(&serde_json::json!({"runtime": "claude"}))),
+            CallerIdentity::Unknown
+        );
+    }
+
+    #[test]
+    fn marker_diagnostics_are_categories_only() {
+        let identity = CallerIdentity::from_transport(Some("claude"), None);
+        let mut value = input();
+        value.identity = &identity;
+        value.claude_available = false;
+        let result = resolve_backend(value);
+        assert_eq!(result.source, ResolutionSource::SafeDefault);
+        assert!(!result.diagnostic.contains("session"));
     }
 }

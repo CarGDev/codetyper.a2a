@@ -48,6 +48,20 @@ fn write_transcript(dir: &Path, rel: &str, body: &str) -> PathBuf {
     p
 }
 
+fn seed_claude_session(dir: &Path, session_id: &str, agent: &str) {
+    let db = rusqlite::Connection::open(dir.join("hub.db")).unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO agents (name, card, created_at, updated_at) VALUES (?, '{}', 'now', 'now')",
+        [agent],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO sessions (agent, directory, session_id, created_at, backend) VALUES (?, ?, ?, 'now', 'claude')",
+        rusqlite::params![agent, dir.display().to_string(), session_id],
+    )
+    .unwrap();
+}
+
 type Row = (String, i64, i64, Option<f64>, Option<i64>, Option<i64>);
 
 fn rows(dir: &Path) -> Vec<Row> {
@@ -133,6 +147,9 @@ fn a_truncated_last_line_waits_for_its_newline_and_nested_transcripts_are_read()
 #[test]
 fn stats_model_shows_one_table_per_source_and_a_broken_claude_dir_never_breaks_it() {
     let dir = tmp("render");
+    let (_, err, ok) = oc(&dir, &["continue", "fixture-init"]);
+    assert!(ok, "{err}");
+    seed_claude_session(&dir, "sess-1", "alice");
     write_transcript(
         &dir,
         "-proj/sess-1.jsonl",
@@ -157,6 +174,12 @@ fn stats_model_shows_one_table_per_source_and_a_broken_claude_dir_never_breaks_i
             && out.contains("cached tokens are listed apart"),
         "{out}"
     );
+    let (agent_stats, err, ok) = oc(&dir, &["stats"]);
+    assert!(ok, "{agent_stats}{err}");
+    assert!(
+        agent_stats.contains("alice") && agent_stats.contains("2/5"),
+        "{agent_stats}"
+    );
     assert_eq!(rows(&dir).len(), 1);
     let (again, _, _) = oc(&dir, &["stats", "--model"]);
     assert_eq!(again, out, "a second run changes nothing");
@@ -170,4 +193,30 @@ fn stats_model_shows_one_table_per_source_and_a_broken_claude_dir_never_breaks_i
         "rows already stored still render: {out}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stats_db_override_does_not_mix_usage_between_temporary_databases() {
+    let first = tmp("override-a");
+    let second = tmp("override-b");
+    let (_, err, ok) = oc(&first, &["continue", "fixture-init"]);
+    assert!(ok, "{err}");
+    seed_claude_session(&first, "sess-1", "alice");
+    write_transcript(
+        &first,
+        "-proj/sess-1.jsonl",
+        &(assistant("m1", "claude-sonnet-5-5", &usage(2, 0, 0, 5)) + "\n"),
+    );
+    let (_, err, ok) = oc(&first, &["stats", "--ingest"]);
+    assert!(ok, "{err}");
+    let (_, err, ok) = oc(&second, &["continue", "fixture-init"]);
+    assert!(ok, "{err}");
+    let (other, err, ok) = oc(&second, &["stats"]);
+    assert!(ok, "{other}{err}");
+    assert!(
+        !other.contains("alice") && !other.contains("claude-sonnet-5-5"),
+        "{other}"
+    );
+    let _ = std::fs::remove_dir_all(first);
+    let _ = std::fs::remove_dir_all(second);
 }

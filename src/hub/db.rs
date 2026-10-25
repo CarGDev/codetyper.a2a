@@ -1,7 +1,7 @@
 //! SQLite state shared by the hub, the dispatcher and `oc` (one WAL file, many processes).
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Row, params_from_iter, types::Value as Sql,
+    params_from_iter, types::Value as Sql, Connection, OpenFlags, OptionalExtension, Row,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -616,9 +616,19 @@ pub struct SourcedUsage<'a> {
 
 /// Insert a usage event of another source; false when that (source, reference) is already stored.
 pub fn record_usage_from(conn: &Connection, u: &SourcedUsage) -> bool {
+    let agent: Option<String> = conn
+        .query_row(
+            "SELECT CASE WHEN COUNT(DISTINCT NULLIF(agent, '')) = 1 THEN MAX(NULLIF(agent, '')) END
+             FROM sessions
+             WHERE session_id = ? AND backend = 'claude'",
+            [u.session],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
     conn.execute(
-        "INSERT OR IGNORE INTO events (ts, task_id, kind, detail, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, model, source, ref) VALUES (?,?,'usage',?,?,?,?,?,?,?,?,?)",
-        rusqlite::params![u.ts, u.session, u.detail, u.tokens_in, u.tokens_out, u.cache_read, u.cache_write, u.cost_usd, u.model, u.source, u.reference],
+        "INSERT OR IGNORE INTO events (ts, task_id, kind, agent, detail, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, model, source, ref) VALUES (?,?,'usage',?,?,?,?,?,?,?,?,?,?)",
+        rusqlite::params![u.ts, u.session, agent, u.detail, u.tokens_in, u.tokens_out, u.cache_read, u.cache_write, u.cost_usd, u.model, u.source, u.reference],
     )
     .is_ok_and(|n| n > 0)
 }
@@ -694,10 +704,9 @@ mod tests {
         drop(open(&path).unwrap());
         let (conn, warning) = open_read_compat(&path).unwrap();
         assert!(warning.is_none());
-        assert!(
-            conn.execute("CREATE TABLE should_not_write (id INTEGER)", [])
-                .is_err()
-        );
+        assert!(conn
+            .execute("CREATE TABLE should_not_write (id INTEGER)", [])
+            .is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -988,6 +997,67 @@ mod tests {
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!((first, again, other, rows), (true, false, true, 4));
+    }
+
+    #[test]
+    fn sourced_usage_attributes_only_one_trusted_claude_session() {
+        let (dir, path) = temp_db("sourced-agent");
+        let conn = open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO agents (name, card, created_at, updated_at) VALUES
+                ('alice', '{}', 'now', 'now'), ('bob', '{}', 'now', 'now'), ('', '{}', 'now', 'now');
+             INSERT INTO sessions (agent, directory, session_id, created_at, backend)
+                VALUES ('alice', '/tmp/project', 'unique', 'now', 'claude'),
+                       ('alice', '/tmp/project', 'duplicate-same', 'now', 'claude'),
+                       ('alice', '/tmp/project-alt', 'duplicate-same', 'now', 'claude'),
+                       ('', '/tmp/project', 'duplicate-same', 'now', 'claude'),
+                       ('alice', '/tmp/project', 'ambiguous', 'now', 'claude'),
+                       ('bob', '/tmp/project', 'ambiguous', 'now', 'claude'),
+                       ('bob', '/tmp/project', 'opencode', 'now', 'opencode'),
+                       ('', '/tmp/project', 'empty-agent', 'now', 'claude');",
+        )
+        .unwrap();
+        for (reference, session) in [
+            ("unique", "unique"),
+            ("duplicate-same", "duplicate-same"),
+            ("missing", "missing"),
+            ("ambiguous", "ambiguous"),
+            ("non-claude", "opencode"),
+            ("empty-agent", "empty-agent"),
+        ] {
+            let inserted = record_usage_from(
+                &conn,
+                &SourcedUsage {
+                    session,
+                    reference,
+                    ..sourced(reference, 1)
+                },
+            );
+            assert!(inserted);
+        }
+        let mut rows = conn
+            .prepare("SELECT ref, agent FROM events WHERE source = 'claude-code' ORDER BY ref")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = rows
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(
+            rows.iter().find(|(reference, _)| reference == "unique"),
+            Some(&("unique".into(), Some("alice".into())))
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|(reference, _)| reference == "duplicate-same"),
+            Some(&("duplicate-same".into(), Some("alice".into())))
+        );
+        assert!(rows
+            .iter()
+            .filter(|(reference, _)| reference != "unique" && reference != "duplicate-same")
+            .all(|(_, agent)| agent.is_none()));
     }
 
     #[test]

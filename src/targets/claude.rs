@@ -1,8 +1,8 @@
 //! The Claude Code target: the agents and commands `init` embeds, converted to Claude Code's format
 //! (see `convert`), and the MCP servers in the user-scope config. Nothing here touches opencode.
 use super::convert;
-use crate::cli::{AGENTS, CLAUDE_MOD, COMMANDS, default_mcp_servers, install, which};
-use serde_json::{Value, json};
+use crate::cli::{default_mcp_servers, install, which, AGENTS, CLAUDE_MOD, COMMANDS};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 /// Where Claude Code keeps its files: the config dir (agents, commands) and the JSON that holds the
@@ -69,7 +69,25 @@ fn claude_server(entry: &Value) -> Value {
 }
 
 fn a2a_server(exe: &Path) -> Value {
-    json!({ "type": "stdio", "command": exe.display().to_string(), "args": ["hub"], "env": {} })
+    json!({ "type": "stdio", "command": exe.display().to_string(), "args": ["hub"], "env": { "A2A_RUNTIME": "claude" } })
+}
+
+fn ensure_runtime_marker(entry: &mut Value) -> Result<bool, String> {
+    let env = entry
+        .as_object_mut()
+        .ok_or("A2A MCP entry is not an object")?
+        .entry("env")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("A2A MCP env is not an object")?;
+    match env.get("A2A_RUNTIME") {
+        Some(Value::String(value)) if value == "claude" => Ok(false),
+        Some(_) => Err("A2A MCP runtime marker conflicts with Claude".into()),
+        None => {
+            env.insert("A2A_RUNTIME".into(), json!("claude"));
+            Ok(true)
+        }
+    }
 }
 
 /// If the entry's `command` is a path to a file that is gone, point it at the current binary
@@ -106,15 +124,19 @@ pub fn register_mcp(file: &Path, exe: &Path, force: bool) -> Result<String, Stri
         .ok_or_else(|| format!("`mcpServers` in {} is not an object", file.display()))?;
     let mut notes = Vec::new();
     match servers.get_mut("a2a") {
-        Some(existing) if !force => match repair(existing, exe) {
-            Some(old) => notes.push(format!(
-                "mcp server a2a path repaired ({old} -> {})",
-                exe.display()
-            )),
-            None => {
-                notes.push("mcp server a2a already registered (use --force to replace)".to_string())
+        Some(existing) if !force => {
+            match repair(existing, exe) {
+                Some(old) => notes.push(format!(
+                    "mcp server a2a path repaired ({old} -> {})",
+                    exe.display()
+                )),
+                None => notes
+                    .push("mcp server a2a already registered (use --force to replace)".to_string()),
             }
-        },
+            if ensure_runtime_marker(existing)? {
+                notes.push("mcp server a2a runtime marker added".into());
+            }
+        }
         _ => {
             servers.insert("a2a".into(), a2a_server(exe));
             notes.push(format!("mcp server a2a registered in {}", file.display()));
@@ -910,7 +932,7 @@ mod tests {
         );
         assert_eq!(
             cfg["mcpServers"]["a2a"],
-            json!({ "type": "stdio", "command": "/x/codetypera2a", "args": ["hub"], "env": {} })
+            json!({ "type": "stdio", "command": "/x/codetypera2a", "args": ["hub"], "env": { "A2A_RUNTIME": "claude" } })
         );
         assert_eq!(cfg["mcpServers"]["context7"]["type"], "http");
         assert!(dir.join(".claude.json.bak-a2a").exists());
@@ -925,6 +947,22 @@ mod tests {
             before,
             "second run changes nothing"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn register_refuses_unknown_a2a_runtime_marker() {
+        let dir = tmp("marker-conflict");
+        let file = dir.join(".claude.json");
+        std::fs::write(
+            &file,
+            r#"{"mcpServers":{"a2a":{"type":"stdio","command":"/x/old","args":["hub"],"env":{"A2A_RUNTIME":"other"}}}}"#,
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&file).unwrap();
+        let result = register_mcp(&file, Path::new("/x/codetypera2a"), false);
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -964,11 +1002,9 @@ mod tests {
         let dir = tmp("broken");
         let file = dir.join(".claude.json");
         std::fs::write(&file, "{ not json").unwrap();
-        assert!(
-            register_mcp(&file, Path::new("/x/a"), false)
-                .unwrap_err()
-                .contains("left untouched")
-        );
+        assert!(register_mcp(&file, Path::new("/x/a"), false)
+            .unwrap_err()
+            .contains("left untouched"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(&dir);
     }
