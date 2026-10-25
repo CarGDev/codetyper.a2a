@@ -19,32 +19,62 @@ fn oc(dir: &std::path::Path, args: &[&str], stdin: &str) -> (String, bool) {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
-    (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        out.status.success(),
+    )
 }
 
 #[test]
 fn statusline_prints_one_line_and_exits_zero_on_any_stdin() {
     let dir = tmp("line");
-    for stdin in ["", "{}", "garbage \u{0} {{{", r#"{"model":{"display_name":"x"}}"#] {
+    for stdin in [
+        "",
+        "{}",
+        "garbage \u{0} {{{",
+        r#"{"model":{"display_name":"x"}}"#,
+    ] {
         let (out, ok) = oc(&dir, &["statusline"], stdin);
         assert!(ok, "stdin {stdin:?}");
         assert_eq!(out, "a2a\n", "no hub database yet, so just the name");
     }
-    assert!(!dir.join("hub.db").exists(), "the status line must not create or migrate the hub");
+    assert!(
+        !dir.join("hub.db").exists(),
+        "the status line must not create or migrate the hub"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn hooks_make_the_line_show_and_forget_a_subagent() {
     let dir = tmp("hooks");
-    oc(&dir, &["statusline", "--hook", "start"], r#"{"agent_id":"a1","agent_type":"Explore","session_id":"s"}"#);
-    assert_eq!(oc(&dir, &["statusline"], "{}").0, "a2a · 1 subagent: Explore\n");
-    let (_, ok) = oc(&dir, &["statusline", "--hook", "stop"], r#"{"agent_id":"a1"}"#);
+    oc(
+        &dir,
+        &["statusline", "--hook", "start"],
+        r#"{"agent_id":"a1","agent_type":"Explore","session_id":"s"}"#,
+    );
+    assert_eq!(
+        oc(&dir, &["statusline"], "{}").0,
+        "a2a · 1 subagent: Explore\n"
+    );
+    let (_, ok) = oc(
+        &dir,
+        &["statusline", "--hook", "stop"],
+        r#"{"agent_id":"a1"}"#,
+    );
     assert!(ok);
     assert_eq!(oc(&dir, &["statusline"], "{}").0, "a2a\n");
-    assert!(oc(&dir, &["statusline", "--hook", "start"], "not json").1, "a bad hook payload still exits 0");
+    assert!(
+        oc(&dir, &["statusline", "--hook", "start"], "not json").1,
+        "a bad hook payload still exits 0"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -58,11 +88,20 @@ fn init_claude_adds_the_status_line_once() {
             .env("OPENCODE_CONFIG_DIR", dir.join("oc"))
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         std::fs::read_to_string(dir.join("claude/settings.json")).unwrap()
     };
     let first = run();
-    assert!(first.contains("\"statusLine\"") && first.contains("--hook start") && first.contains("--hook stop"), "{first}");
+    assert!(
+        first.contains("\"statusLine\"")
+            && first.contains("--hook start")
+            && first.contains("--hook stop"),
+        "{first}"
+    );
     assert_eq!(run(), first, "a second run changes nothing");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -71,7 +110,7 @@ fn init_claude_adds_the_status_line_once() {
 fn seeded(name: &str) -> std::path::PathBuf {
     let dir = tmp(name);
     let st = Command::new(env!("CARGO_BIN_EXE_codetypera2a"))
-        .args(["oc", "status"])
+        .args(["oc", "continue", "__statusline_seed__"])
         .env("A2A_DB", dir.join("hub.db"))
         .env("A2A_DISPATCHER_PID", dir.join("d.pid"))
         .env("OPENCODE_BIN", "/usr/bin/false")
@@ -80,6 +119,13 @@ fn seeded(name: &str) -> std::path::PathBuf {
         .unwrap();
     assert!(st.status.success());
     let c = rusqlite::Connection::open(dir.join("hub.db")).unwrap();
+    c.execute(
+        "DELETE FROM hop_allow WHERE context_id='__statusline_seed__'",
+        [],
+    )
+    .unwrap();
+    c.execute("DELETE FROM contexts WHERE id='__statusline_seed__'", [])
+        .unwrap();
     c.execute_batch(
         "INSERT INTO agents (name, card, created_at, updated_at) VALUES ('orchestrator','{}','t','t'), ('mentor','{}','t','t');
          INSERT INTO contexts (id, created_at, updated_at) VALUES ('c1','t','t');",
@@ -87,7 +133,12 @@ fn seeded(name: &str) -> std::path::PathBuf {
     .unwrap();
     for (id, state, dir_, msg) in [
         ("aaaaaaaa-1", "completed", "/proj/a", "the review is done"),
-        ("bbbbbbbb-2", "input-required", "/elsewhere", "which branch?"),
+        (
+            "bbbbbbbb-2",
+            "input-required",
+            "/elsewhere",
+            "which branch?",
+        ),
         ("cccccccc-3", "working", "/proj/a", "busy"),
     ] {
         let status = serde_json::json!({"role":"agent","parts":[{"text":msg}]}).to_string();
@@ -104,16 +155,37 @@ fn seeded(name: &str) -> std::path::PathBuf {
 #[test]
 fn the_inbox_hook_adds_the_finished_results_of_this_folder_once() {
     let dir = seeded("inbox");
-    let (out, ok) = oc(&dir, &["statusline", "--hook", "inbox"], r#"{"hook_event_name":"UserPromptSubmit","cwd":"/proj/a","prompt":"hi"}"#);
+    let (out, ok) = oc(
+        &dir,
+        &["statusline", "--hook", "inbox"],
+        r#"{"hook_event_name":"UserPromptSubmit","cwd":"/proj/a","prompt":"hi"}"#,
+    );
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
     assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
-    let text = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-    assert!(text.contains("aaaaaaaa") && text.contains("completed") && text.contains("the review is done"), "{text}");
+    let text = v["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.contains("aaaaaaaa")
+            && text.contains("completed")
+            && text.contains("the review is done"),
+        "{text}"
+    );
     assert!(text.contains("mcp__a2a__get_task"), "{text}");
-    assert!(!text.contains("bbbbbbbb") && !text.contains("cccccccc"), "other folders and running tasks stay out: {text}");
-    let (again, ok) = oc(&dir, &["statusline", "--hook", "inbox"], r#"{"cwd":"/proj/a"}"#);
-    assert!(ok && again.trim().is_empty(), "delivered once, then silent: {again:?}");
+    assert!(
+        !text.contains("bbbbbbbb") && !text.contains("cccccccc"),
+        "other folders and running tasks stay out: {text}"
+    );
+    let (again, ok) = oc(
+        &dir,
+        &["statusline", "--hook", "inbox"],
+        r#"{"cwd":"/proj/a"}"#,
+    );
+    assert!(
+        ok && again.trim().is_empty(),
+        "delivered once, then silent: {again:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -182,6 +182,9 @@ pub struct ModelStats {
     pub model: String,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    /// Prompt-cache tokens (Claude Code); 0 for sources that do not record them.
+    pub cache_read: i64,
+    pub cache_write: i64,
     pub cost_usd: Option<f64>,
     pub turns: i64,
     pub tasks: i64,
@@ -196,7 +199,8 @@ pub fn model_stats(conn: &Connection) -> Result<Vec<ModelStats>, String> {
             "SELECT COALESCE(NULLIF(source, ''), 'opencode'),
                COALESCE(NULLIF(model, ''), CASE WHEN json_valid(detail) THEN NULLIF(json_extract(detail, '$.model'), '') END, 'unknown'),
                COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0), SUM(cost_usd),
-               COUNT(*), COUNT(DISTINCT task_id), COUNT(DISTINCT agent)
+               COUNT(*), COUNT(DISTINCT task_id), COUNT(DISTINCT agent),
+               COALESCE(SUM(tokens_cache_read), 0), COALESCE(SUM(tokens_cache_write), 0)
              FROM events WHERE kind = 'usage' GROUP BY 1, 2 ORDER BY 1, 2",
         )
         .map_err(|e| e.to_string())?;
@@ -211,6 +215,8 @@ pub fn model_stats(conn: &Connection) -> Result<Vec<ModelStats>, String> {
                 turns: r.get(5)?,
                 tasks: r.get(6)?,
                 agents: r.get(7)?,
+                cache_read: r.get(8)?,
+                cache_write: r.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -315,19 +321,53 @@ mod tests {
         db::record_usage(&conn, "t1", "c", "build", 100, 10, Some(0.5), model, sonnet);
         db::record_usage(&conn, "t1", "c", "build", 50, 5, None, model, sonnet);
         db::record_usage(&conn, "t2", "c", "plan", 25, 2, Some(0.25), model, sonnet);
-        db::record_usage(&conn, "t3", "c", "mentor", 7, 1, None, None, r#"{"model":null}"#);
+        db::record_usage(
+            &conn,
+            "t3",
+            "c",
+            "mentor",
+            7,
+            1,
+            None,
+            None,
+            r#"{"model":null}"#,
+        );
         db::record_usage(&conn, "t4", "c", "mentor", 3, 1, None, None, "{}");
-        db::record_event(&conn, Some("t1"), Some("c"), "task_created", Some("build"), Some("x"));
+        db::record_event(
+            &conn,
+            Some("t1"),
+            Some("c"),
+            "task_created",
+            Some("build"),
+            Some("x"),
+        );
         let mut m = model_stats(&conn).unwrap();
         m.sort_by(|a, b| a.model.cmp(&b.model));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(m.len(), 2, "{m:?}");
         let (known, unknown) = (&m[0], &m[1]);
         assert_eq!(known.model, "github-copilot/claude-sonnet-5.5");
-        assert_eq!((known.tokens_in, known.tokens_out, known.turns, known.tasks, known.agents), (175, 17, 3, 2, 2));
+        assert_eq!(
+            (
+                known.tokens_in,
+                known.tokens_out,
+                known.turns,
+                known.tasks,
+                known.agents
+            ),
+            (175, 17, 3, 2, 2)
+        );
         assert_eq!(known.cost_usd, Some(0.75));
         assert_eq!(unknown.model, "unknown");
-        assert_eq!((unknown.tokens_in, unknown.turns, unknown.tasks, unknown.agents), (10, 2, 2, 1));
+        assert_eq!(
+            (
+                unknown.tokens_in,
+                unknown.turns,
+                unknown.tasks,
+                unknown.agents
+            ),
+            (10, 2, 2, 1)
+        );
         assert_eq!(unknown.cost_usd, None);
     }
 
@@ -338,13 +378,44 @@ mod tests {
         let conn = db::open(&dir.join("t.db")).unwrap();
         let m = Some("claude-sonnet-5-5");
         db::record_usage(&conn, "t1", "c", "build", 100, 10, None, m, "{}"); // dispatcher row: NULL source
-        let claude = |reference, session| db::SourcedUsage { source: "claude-code", reference, ts: "t", session, tokens_in: 7, tokens_out: 1, cost_usd: Some(0.25), model: "claude-sonnet-5-5", detail: "{}" };
+        let claude = |reference, session| db::SourcedUsage {
+            source: "claude-code",
+            reference,
+            ts: "t",
+            session,
+            tokens_in: 7,
+            tokens_out: 1,
+            cache_read: Some(30),
+            cache_write: Some(4),
+            cost_usd: Some(0.25),
+            model: "claude-sonnet-5-5",
+            detail: "{}",
+        };
         db::record_usage_from(&conn, &claude("m1", "s1"));
         db::record_usage_from(&conn, &claude("m2", "s2"));
-        let got: Vec<(String, String, i64, i64, i64)> =
-            model_stats(&conn).unwrap().into_iter().map(|s| (s.source, s.model, s.tokens_in, s.turns, s.tasks)).collect();
+        let got: Vec<(String, String, i64, i64, i64)> = model_stats(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.source, s.model, s.tokens_in, s.turns, s.tasks))
+            .collect();
+        let cache: Vec<(i64, i64)> = model_stats(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.cache_read, s.cache_write))
+            .collect();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(got, [("claude-code".into(), "claude-sonnet-5-5".into(), 14, 2, 2), ("opencode".into(), "claude-sonnet-5-5".into(), 100, 1, 1)]);
+        assert_eq!(
+            got,
+            [
+                ("claude-code".into(), "claude-sonnet-5-5".into(), 14, 2, 2),
+                ("opencode".into(), "claude-sonnet-5-5".into(), 100, 1, 1)
+            ]
+        );
+        assert_eq!(
+            cache,
+            [(60, 8), (0, 0)],
+            "cache buckets are summed; NULL reads as 0"
+        );
     }
 
     #[test]
@@ -352,7 +423,17 @@ mod tests {
         use crate::hub::db;
         let dir = std::env::temp_dir().join(format!("a2a-trace-fallback-{}", std::process::id()));
         let conn = db::open(&dir.join("t.db")).unwrap();
-        db::record_usage(&conn, "t1", "c", "build", 100, 10, None, Some("a/column"), r#"{"model":"a/stale"}"#);
+        db::record_usage(
+            &conn,
+            "t1",
+            "c",
+            "build",
+            100,
+            10,
+            None,
+            Some("a/column"),
+            r#"{"model":"a/stale"}"#,
+        );
         // a binary of schema 2 knows no `model` column
         conn.execute(
             "INSERT INTO events (ts, task_id, context_id, kind, agent, detail, tokens_in, tokens_out) VALUES (?,?,?,'usage',?,?,?,?)",
@@ -368,6 +449,9 @@ mod tests {
         m.sort_by(|a, b| a.model.cmp(&b.model));
         let _ = std::fs::remove_dir_all(&dir);
         let got: Vec<(&str, i64)> = m.iter().map(|s| (s.model.as_str(), s.tokens_in)).collect();
-        assert_eq!(got, vec![("a/column", 100), ("a/detail", 5), ("unknown", 2)]);
+        assert_eq!(
+            got,
+            vec![("a/column", 100), ("a/detail", 5), ("unknown", 2)]
+        );
     }
 }

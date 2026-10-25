@@ -85,7 +85,9 @@ fn ok<T>(r: Result<T, String>) -> T {
 }
 
 fn cwd() -> String {
-    std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_else(|_| ".".into())
+    std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|_| ".".into())
 }
 
 fn ensure_dispatcher() {
@@ -95,9 +97,15 @@ fn ensure_dispatcher() {
         Err(e) => die(&format!("cannot start the dispatcher: {e}")),
     }
     match crate::dispatcher::dispatcher::ensure_status_window() {
-        Ok(sys::Tab::Created) => println!("live status opened in a new tmux window (tab): a2a-status"),
-        Ok(sys::Tab::AlreadyOpen) => println!("live status is already open in tmux window a2a-status"),
-        Ok(sys::Tab::NotInTmux) => println!("not inside tmux: run `oc watch` in another terminal for the live status"),
+        Ok(sys::Tab::Created) => {
+            println!("live status opened in a new tmux window (tab): a2a-status")
+        }
+        Ok(sys::Tab::AlreadyOpen) => {
+            println!("live status is already open in tmux window a2a-status")
+        }
+        Ok(sys::Tab::NotInTmux) => {
+            println!("not inside tmux: run `oc watch` in another terminal for the live status")
+        }
         Err(e) => eprintln!("oc: could not open the tmux status window: {e}"),
     }
 }
@@ -108,15 +116,30 @@ fn watch() -> i32 {
     let log = crate::dispatcher::dispatcher::log_path();
     println!("a2a live status  (log: {})", log.display());
     if let Ok(d) = db::open(&paths::db_path()) {
-        if let Ok(open) = db::tasks(&d, "WHERE state IN ('submitted','working','input-required','auth-required') ORDER BY updated_at DESC LIMIT 10", &[]) {
+        if let Ok(open) = db::tasks(
+            &d,
+            "WHERE state IN ('submitted','working','input-required','auth-required') ORDER BY updated_at DESC LIMIT 10",
+            &[],
+        ) {
             println!("open tasks: {}", open.len());
             for t in open {
-                println!("  {} {:<14} {} -> {}", &t.id[..8], t.state, t.from_agent, t.to_agent);
+                println!(
+                    "  {} {:<14} {} -> {}",
+                    &t.id[..8],
+                    t.state,
+                    t.from_agent,
+                    t.to_agent
+                );
             }
         }
     }
     println!("{}", "-".repeat(60));
-    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).read(true).open(&log) else {
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .read(true)
+        .open(&log)
+    else {
         die(&format!("cannot open {}", log.display()))
     };
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
@@ -144,7 +167,13 @@ pub(crate) fn hop_capped(d: &rusqlite::Connection, ctx: &str, max_hops: i64) -> 
     let n: i64 = d
         .query_row("SELECT COUNT(*) FROM nudges WHERE context_id = ? AND kind IN ('assignee','requester') AND status IN ('claimed','delivered')", [ctx], |r| r.get(0))
         .unwrap_or(0);
-    let grants: i64 = d.query_row("SELECT grants FROM hop_allow WHERE context_id = ?", [ctx], |r| r.get(0)).unwrap_or(0);
+    let grants: i64 = d
+        .query_row(
+            "SELECT grants FROM hop_allow WHERE context_id = ?",
+            [ctx],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     n >= max_hops * (1 + grants)
 }
 
@@ -160,12 +189,19 @@ fn open_project(args: &[String]) -> i32 {
             _ => die("usage: oc open-project <dir> [--prompt <text>]"),
         }
     }
-    let Some(dir) = dir else { die("usage: oc open-project <dir> [--prompt <text>]") };
-    let dir = std::fs::canonicalize(&dir).unwrap_or_else(|_| die(&format!("no such folder: {dir}"))).display().to_string();
+    let Some(dir) = dir else {
+        die("usage: oc open-project <dir> [--prompt <text>]")
+    };
+    let dir = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|_| die(&format!("no such folder: {dir}")))
+        .display()
+        .to_string();
     let cmd = format!("cd '{}' && oc", dir.replace('\'', "'\\''"));
     match ok(sys::tmux_ensure_window(&sys::dir_base(&dir), &cmd)) {
         sys::Tab::Created => println!("opened tmux window {} for {dir}", sys::dir_base(&dir)),
-        sys::Tab::AlreadyOpen => println!("tmux window {} already open for {dir}", sys::dir_base(&dir)),
+        sys::Tab::AlreadyOpen => {
+            println!("tmux window {} already open for {dir}", sys::dir_base(&dir))
+        }
         sys::Tab::NotInTmux => die("not inside tmux: cannot open a tab"),
     }
     let Some(text) = prompt else { return 0 };
@@ -175,15 +211,21 @@ fn open_project(args: &[String]) -> i32 {
         if let Some(s) = opencode::list(&dir).into_iter().next() {
             ok(opencode::switch_agent(&s.id, "orchestrator"));
             ok(opencode::prompt(&s.id, &text));
-            println!("prompt sent to the orchestrator of {dir} (session {})", s.id);
+            println!(
+                "prompt sent to the orchestrator of {dir} (session {})",
+                s.id
+            );
             return 0;
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
-    die(&format!("no opencode session appeared in {dir} within {wait}s; send the prompt from its tab"))
+    die(&format!(
+        "no opencode session appeared in {dir} within {wait}s; send the prompt from its tab"
+    ))
 }
 
-const OPEN_STATES: &str = "WHERE state IN ('submitted','working','input-required','auth-required') ORDER BY created_at";
+const OPEN_STATES: &str =
+    "WHERE state IN ('submitted','working','input-required','auth-required') ORDER BY created_at";
 
 /// `oc cancel`: cancel open tasks from the terminal and stop the turns that work on them.
 fn cancel(args: &[String]) -> i32 {
@@ -211,7 +253,11 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
         die(USAGE);
     }
     let d = ok(db::open(&paths::db_path()));
-    let dir = dir.map(|x| std::fs::canonicalize(&x).map(|p| p.display().to_string()).unwrap_or(x));
+    let dir = dir.map(|x| {
+        std::fs::canonicalize(&x)
+            .map(|p| p.display().to_string())
+            .unwrap_or(x)
+    });
     let tasks: Vec<_> = ok(db::tasks(&d, OPEN_STATES, &[]))
         .into_iter()
         .filter(|t| {
@@ -230,7 +276,14 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
         return (0, Default::default());
     }
     for t in &tasks {
-        println!("{} {:<14} {} -> {} ctx={}", &t.id[..8.min(t.id.len())], t.state, t.from_agent, t.to_agent, t.context_id);
+        println!(
+            "{} {:<14} {} -> {} ctx={}",
+            &t.id[..8.min(t.id.len())],
+            t.state,
+            t.from_agent,
+            t.to_agent,
+            t.context_id
+        );
     }
     if !yes && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         use std::io::Write;
@@ -243,7 +296,8 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
             return (0, Default::default());
         }
     }
-    ok(d.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string()));
+    ok(d.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| e.to_string()));
     let mut canceled = vec![];
     for t in &tasks {
         let ts = db::now();
@@ -251,7 +305,8 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
             "messageId": uuid::Uuid::new_v4().to_string(), "role": "agent", "from": "user",
             "parts": [{ "text": "canceled by user (oc cancel)" }], "taskId": t.id,
         });
-        let mut history: serde_json::Value = serde_json::from_str(&t.history).unwrap_or(serde_json::json!([]));
+        let mut history: serde_json::Value =
+            serde_json::from_str(&t.history).unwrap_or(serde_json::json!([]));
         if let Some(h) = history.as_array_mut() {
             h.push(msg.clone());
         }
@@ -263,7 +318,14 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
             )
             .unwrap_or(0);
         if n == 1 {
-            db::record_event(&d, Some(&t.id), Some(&t.context_id), "state_change", Some("user"), Some("canceled"));
+            db::record_event(
+                &d,
+                Some(&t.id),
+                Some(&t.context_id),
+                "state_change",
+                Some("user"),
+                Some("canceled"),
+            );
             // nothing may still be delivered for a canceled task
             let _ = d.execute(
                 "UPDATE nudges SET status='dead', last_error='task canceled', updated_at=?, claimed_by=NULL, claim_expires_at=NULL
@@ -282,19 +344,30 @@ fn cancel_inner(args: &[String]) -> (i32, std::collections::BTreeSet<String>) {
     let running = backend::running_everywhere();
     let mut stopped = std::collections::BTreeSet::new(); // sessions interrupted (once each)
     for t in &canceled {
-        let Some(dir) = t.directory.as_deref().or(t.from_directory.as_deref()) else { continue };
-        let rows = db::sessions(&d, "WHERE agent = ? AND status = 'live'", &[&t.to_agent]).unwrap_or_default();
-        for r in rows.iter().filter(|r| r.directory == dir || crate::hub::project::same_project(dir, &r.directory)) {
+        let Some(dir) = t.directory.as_deref().or(t.from_directory.as_deref()) else {
+            continue;
+        };
+        let rows = db::sessions(&d, "WHERE agent = ? AND status = 'live'", &[&t.to_agent])
+            .unwrap_or_default();
+        for r in rows
+            .iter()
+            .filter(|r| r.directory == dir || crate::hub::project::same_project(dir, &r.directory))
+        {
             if !running.contains(&r.session_id) || !stopped.insert(r.session_id.clone()) {
                 continue;
             }
-            let Some(runtime) = backend::for_stored(r.backend.as_deref()) else { continue };
+            let Some(runtime) = backend::for_stored(r.backend.as_deref()) else {
+                continue;
+            };
             match runtime.interrupt(&r.session_id) {
                 Ok(()) => println!("interrupted {} (session {})", t.to_agent, r.session_id),
                 Err(e) => {
                     eprintln!("could not interrupt session {}: {e}", r.session_id);
                     if e.contains("404") {
-                        let _ = d.execute("UPDATE sessions SET status='stale' WHERE session_id = ?", [&r.session_id]);
+                        let _ = d.execute(
+                            "UPDATE sessions SET status='stale' WHERE session_id = ?",
+                            [&r.session_id],
+                        );
                     }
                 }
             }
@@ -318,10 +391,14 @@ fn register_client(pid: u32) {
 
 /// pids of registered opencodes that are still alive (dead ones are forgotten).
 fn live_clients() -> Vec<u32> {
-    let Ok(rd) = std::fs::read_dir(clients_dir()) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(clients_dir()) else {
+        return vec![];
+    };
     let mut out = vec![];
     for e in rd.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
         if sys::pid_alive(pid) {
             out.push(pid);
         } else {
@@ -357,7 +434,9 @@ fn shutdown() -> i32 {
         // any other turn of a session this setup opened is still spending tokens
         let running = backend::running_everywhere();
         for r in db::sessions(&d, "WHERE status = 'live'", &[]).unwrap_or_default() {
-            let Some(runtime) = backend::for_stored(r.backend.as_deref()) else { continue };
+            let Some(runtime) = backend::for_stored(r.backend.as_deref()) else {
+                continue;
+            };
             if running.contains(&r.session_id) && !interrupted.contains(&r.session_id) {
                 match runtime.interrupt(&r.session_id) {
                     Ok(()) => println!("interrupted {} (session {})", r.agent, r.session_id),
@@ -365,19 +444,40 @@ fn shutdown() -> i32 {
                 }
             }
         }
-        let _ = d.execute("UPDATE sessions SET status='ended', ended_at=? WHERE status='live'", [db::now()]);
+        let _ = d.execute(
+            "UPDATE sessions SET status='ended', ended_at=? WHERE status='live'",
+            [db::now()],
+        );
     }
     crate::dispatcher::dispatcher::stop_all();
     crate::dispatcher::dispatcher::sweep_unregistered();
     let _ = sys::tmux(&["kill-window", "-t", "a2a-status"]);
-    println!("a2a stopped: tasks canceled, turns interrupted, sessions retired, dispatcher stopped");
+    println!(
+        "a2a stopped: tasks canceled, turns interrupted, sessions retired, dispatcher stopped"
+    );
     0
 }
 
 /// Subcommands that never open the TUI: they run as plain opencode, with or without tmux.
 const PLAIN_SUBCOMMANDS: &[&str] = &[
-    "upgrade", "update", "uninstall", "acp", "api", "debug", "auth", "mcp", "plugin", "models", "stats", "run", "session",
-    "service", "reload", "pair", "serve", "mini",
+    "upgrade",
+    "update",
+    "uninstall",
+    "acp",
+    "api",
+    "debug",
+    "auth",
+    "mcp",
+    "plugin",
+    "models",
+    "stats",
+    "run",
+    "session",
+    "service",
+    "reload",
+    "pair",
+    "serve",
+    "mini",
 ];
 
 /// Why a2a cannot run here, `None` when tmux is installed and this pane is inside it.
@@ -387,10 +487,14 @@ fn tmux_problem(in_pane: bool, installed: bool) -> Option<&'static str> {
         return None;
     }
     if !installed {
-        return Some("tmux is not installed (a2a opens one tab per agent in tmux); install it, e.g. `brew install tmux`");
+        return Some(
+            "tmux is not installed (a2a opens one tab per agent in tmux); install it, e.g. `brew install tmux`",
+        );
     }
     if !in_pane {
-        return Some("not inside tmux (a2a opens one tab per agent in tmux); start it with `tmux`, then run oc again");
+        return Some(
+            "not inside tmux (a2a opens one tab per agent in tmux); start it with `tmux`, then run oc again",
+        );
     }
     None
 }
@@ -398,7 +502,10 @@ fn tmux_problem(in_pane: bool, installed: bool) -> Option<&'static str> {
 /// opencode's own flags and plain subcommands do not need a2a, so they do not need tmux.
 fn needs_tmux(args: &[String]) -> bool {
     let first = args.first().map(String::as_str).unwrap_or("");
-    let plain = first.starts_with('-') && !args.iter().any(|a| a == "-c" || a == "-s" || a == "--continue" || a == "--session");
+    let plain = first.starts_with('-')
+        && !args
+            .iter()
+            .any(|a| a == "-c" || a == "-s" || a == "--continue" || a == "--session");
     !(plain || PLAIN_SUBCOMMANDS.contains(&first))
 }
 
@@ -431,11 +538,19 @@ pub fn run(args: &[String]) -> i32 {
         return super::statusline::run(&args[1..]);
     }
     if args.first().map(String::as_str) == Some("follow") {
-        let Some(file) = args.get(1) else { die("usage: oc follow <log file>") };
+        let Some(file) = args.get(1) else {
+            die("usage: oc follow <log file>")
+        };
         return crate::dispatcher::claude_backend::follow(std::path::Path::new(file));
     }
-    let (cmd, arg) = (args.first().map(String::as_str), args.get(1).map(String::as_str));
-    if !matches!(cmd, Some("help" | "--help" | "-h" | "version" | "--version" | "-V")) {
+    let (cmd, arg) = (
+        args.first().map(String::as_str),
+        args.get(1).map(String::as_str),
+    );
+    if !matches!(
+        cmd,
+        Some("help" | "--help" | "-h" | "version" | "--version" | "-V")
+    ) {
         if let Some(msg) = crate::cli::heal(&paths::config_dir(), &crate::cli::stable_exe()) {
             eprintln!("oc: {msg}");
         }
@@ -452,23 +567,33 @@ pub fn run(args: &[String]) -> i32 {
                 return 1;
             }
             // `--client <pid>`: an opencode (the tabs plugin's TUI) that counts as running
-            if let (Some("--client"), Some(pid)) = (arg, args.get(2).and_then(|p| p.parse::<u32>().ok())) {
+            if let (Some("--client"), Some(pid)) =
+                (arg, args.get(2).and_then(|p| p.parse::<u32>().ok()))
+            {
                 register_client(pid);
             }
             ensure_dispatcher()
         }
         Some("shutdown") => {
             let force = args[1..].iter().any(|a| a == "--force");
-            let client = args.iter().position(|a| a == "--client").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
+            let client = args
+                .iter()
+                .position(|a| a == "--client")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|p| p.parse().ok());
             return shutdown_if_last(client.unwrap_or(0), force);
         }
         Some("dispatch") => return crate::dispatcher::dispatcher::run(),
         Some("watch") => return watch(),
         Some("agent" | "open") => {
-            let Some(agent) = arg else { die("usage: oc agent <name>") };
+            let Some(agent) = arg else {
+                die("usage: oc agent <name>")
+            };
             let dir = cwd();
             let Some(s) = opencode::list(&dir).into_iter().next() else {
-                die(&format!("no opencode session open in {dir}; start one with: oc"))
+                die(&format!(
+                    "no opencode session open in {dir}; start one with: oc"
+                ))
             };
             ok(opencode::switch_agent(&s.id, agent));
             println!("session {} -> agent {agent}", s.id);
@@ -480,7 +605,9 @@ pub fn run(args: &[String]) -> i32 {
             println!("dispatcher stopped");
         }
         Some("continue") => {
-            let Some(ctx) = arg else { die("usage: oc continue <contextId>") };
+            let Some(ctx) = arg else {
+                die("usage: oc continue <contextId>")
+            };
             let max_hops = paths::env_u64("DISPATCH_MAX_HOPS", 40) as i64;
             let d = ok(db::open(&paths::db_path()));
             ok(db::ensure_context(&d, ctx).map_err(|e| e.to_string()));
@@ -489,21 +616,37 @@ pub fn run(args: &[String]) -> i32 {
                 [ctx],
             )
             .map_err(|e| e.to_string()));
-            let g: i64 = ok(d.query_row("SELECT grants FROM hop_allow WHERE context_id = ?", [ctx], |r| r.get(0)).map_err(|e| e.to_string()));
-            println!("context {ctx}: allowance is now {} hops (+{max_hops})", max_hops * (1 + g));
+            let g: i64 = ok(d
+                .query_row(
+                    "SELECT grants FROM hop_allow WHERE context_id = ?",
+                    [ctx],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string()));
+            println!(
+                "context {ctx}: allowance is now {} hops (+{max_hops})",
+                max_hops * (1 + g)
+            );
         }
         Some("open-project") => return open_project(&args[1..]),
         Some("cancel") => return cancel(&args[1..]),
         Some("trace") => {
-            let Some(id) = arg else { die("usage: oc trace <task-id-or-prefix>") };
-            let d = ok(db::open(&paths::db_path()));
+            let Some(id) = arg else {
+                die("usage: oc trace <task-id-or-prefix>")
+            };
+            let d = ok(db::open_read_compat(&paths::db_path()).map(|(d, _)| d));
             let t = ok(crate::trace::find_task(&d, id));
             let evs = ok(crate::trace::events_for(&d, &t.id));
             print!("{}", crate::trace::format_trace(&t, &evs));
         }
         Some("stats") => {
-            let d = ok(db::open(&paths::db_path()));
-            let colour = std::io::IsTerminal::is_terminal(&std::io::stdout()) && std::env::var_os("NO_COLOR").is_none();
+            let d = ok(if args.iter().any(|a| a == "--ingest") {
+                db::open(&paths::db_path())
+            } else {
+                db::open_read_compat(&paths::db_path()).map(|(d, _)| d)
+            });
+            let colour = std::io::IsTerminal::is_terminal(&std::io::stdout())
+                && std::env::var_os("NO_COLOR").is_none();
             let by_model = args.iter().any(|a| a == "--model" || a == "--models");
             if args.iter().any(|a| a == "--ingest") {
                 match crate::launcher::claude_usage::ingest(&d, &paths::claude_dir()) {
@@ -513,13 +656,11 @@ pub fn run(args: &[String]) -> i32 {
                 return 0;
             }
             // a failed ingest never breaks the stats: the rows stored so far are still shown
-            if by_model {
-                if let Err(e) = crate::launcher::claude_usage::ingest(&d, &paths::claude_dir()) {
-                    eprintln!("oc: warning: claude code usage not refreshed: {e}");
-                }
-            }
+            // Read-only stats must not ingest or mutate usage state implicitly.
             let table = match by_model {
-                true => crate::stats_view::render_models(&ok(crate::trace::model_stats(&d)), colour),
+                true => {
+                    crate::stats_view::render_models(&ok(crate::trace::model_stats(&d)), colour)
+                }
                 false => crate::stats_view::render(&ok(crate::trace::agent_stats(&d)), colour),
             };
             print!("{table}");
@@ -532,16 +673,22 @@ pub fn run(args: &[String]) -> i32 {
         }
         Some("answer") => println!("{}", ok(crate::launcher::panel::answer(&args[1..]))),
         Some("status") => {
-            let running = sys::dispatcher_pid(&paths::dispatcher_pid_path()).is_some();
-            println!("dispatcher: {}", if running { "running" } else { "not running" });
+            let owner = paths::resolve_runtime_home(&paths::runtime_home(), &paths::legacy_home());
+            let running = sys::dispatcher_pid(&paths::runtime_paths(&owner).pid).is_some();
+            println!(
+                "dispatcher: {}",
+                if running { "running" } else { "not running" }
+            );
             if let Ok(ids) = opencode::active_ids() {
                 println!("sessions running a turn: {}", ids.len());
             }
-            let claude_turns = backend::for_stored(Some("claude")).and_then(|b| b.active_ids().ok()).map_or(0, |ids| ids.len());
+            let claude_turns = backend::for_stored(Some("claude"))
+                .and_then(|b| b.active_ids().ok())
+                .map_or(0, |ids| ids.len());
             if claude_turns > 0 {
                 println!("claude turns running: {claude_turns}");
             }
-            let d = ok(db::open(&paths::db_path()));
+            let d = ok(db::open_read_compat(&paths::db_path()).map(|(d, _)| d));
             let open = ok(db::tasks(
                 &d,
                 "WHERE state IN ('submitted','working','input-required','auth-required') ORDER BY updated_at DESC LIMIT 20",
@@ -552,8 +699,17 @@ pub fn run(args: &[String]) -> i32 {
                 let capped = hop_capped(&d, &t.context_id, max_hops);
                 println!(
                     "{} {:<14} {} -> {} {} ctx={}{}",
-                    &t.id[..8], t.state, t.from_agent, t.to_agent, t.directory.as_deref().unwrap_or("-"), t.context_id,
-                    if capped { format!(" HOP-CAPPED (run: oc continue {})", t.context_id) } else { String::new() }
+                    &t.id[..8],
+                    t.state,
+                    t.from_agent,
+                    t.to_agent,
+                    t.directory.as_deref().unwrap_or("-"),
+                    t.context_id,
+                    if capped {
+                        format!(" HOP-CAPPED (run: oc continue {})", t.context_id)
+                    } else {
+                        String::new()
+                    }
                 );
             }
         }

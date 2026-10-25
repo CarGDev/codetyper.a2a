@@ -7,11 +7,12 @@ mod hub;
 mod launcher;
 mod model_guard;
 mod models;
-mod stats_view;
-mod targets;
+mod ollama;
 mod opencode;
 mod paths;
+mod stats_view;
 mod sys;
+mod targets;
 mod trace;
 
 fn main() {

@@ -10,7 +10,11 @@ struct Paint(bool);
 
 impl Paint {
     fn cell(&self, code: &str, text: &str, width: usize, right: bool) -> String {
-        let padded = if right { format!("{text:>width$}") } else { format!("{text:<width$}") };
+        let padded = if right {
+            format!("{text:>width$}")
+        } else {
+            format!("{text:<width$}")
+        };
         if !self.0 || text.is_empty() {
             return padded;
         }
@@ -83,15 +87,28 @@ fn bar_cell(p: &Paint, tokens: i64, top: i64) -> String {
     }
     let share = tokens as f64 / top as f64;
     let (full, rest) = bar_parts(share);
-    let paint = |code: &str, s: String| if p.0 { format!("\x1b[{code}m{s}\x1b[0m") } else { s };
+    let paint = |code: &str, s: String| {
+        if p.0 {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s
+        }
+    };
     format!("{}{}", paint(heat(share), full), paint("90", rest))
 }
 
 pub fn render(stats: &[AgentStats], color: bool) -> String {
     let p = Paint(color);
     // a row with nothing to show (the `user` and `dispatcher` senders) is left out
-    let mut rows: Vec<&AgentStats> = stats.iter().filter(|s| has_usage(s) || s.received > 0).collect();
-    rows.sort_by(|a, b| total_tokens(b).cmp(&total_tokens(a)).then_with(|| a.agent.cmp(&b.agent)));
+    let mut rows: Vec<&AgentStats> = stats
+        .iter()
+        .filter(|s| has_usage(s) || s.received > 0)
+        .collect();
+    rows.sort_by(|a, b| {
+        total_tokens(b)
+            .cmp(&total_tokens(a))
+            .then_with(|| a.agent.cmp(&b.agent))
+    });
     let top = rows.first().map_or(0, |s| total_tokens(s));
     let head = |s: &str, w: usize, right: bool| p.cell("1;36", s, w, right);
     let mut out = format!(
@@ -124,11 +141,19 @@ pub fn render(stats: &[AgentStats], color: bool) -> String {
     }
     let sum = |f: fn(&AgentStats) -> Option<i64>| Some(stats.iter().filter_map(f).sum::<i64>());
     // fold from +0.0: an empty f64 sum is -0.0 and printed as `~$-0.0000`
-    let cost = stats.iter().filter_map(|s| s.cost_usd).fold(0.0, |a, c| a + c);
+    let cost = stats
+        .iter()
+        .filter_map(|s| s.cost_usd)
+        .fold(0.0, |a, c| a + c);
     out.push_str(&format!(
         "{} {} {} {}\n",
         p.cell("1", "total", 20, false),
-        p.cell("1", &tokens_cell(sum(|s| s.tokens_in), sum(|s| s.tokens_out)), 15, true),
+        p.cell(
+            "1",
+            &tokens_cell(sum(|s| s.tokens_in), sum(|s| s.tokens_out)),
+            15,
+            true
+        ),
         " ".repeat(BAR),
         p.cell("1;33", &cost_cell(Some(cost)), 10, true),
     ));
@@ -138,10 +163,15 @@ pub fn render(stats: &[AgentStats], color: bool) -> String {
 }
 
 const OPENCODE_NOTE: &str = "cost is opencode's figure when it charges, otherwise an estimate from the published price table";
-const CLAUDE_NOTE: &str = "tokens in include cache (input + cache creation + cache read); tasks are sessions; cost is an estimate from the published price table, blank for models it does not list";
+const CLAUDE_NOTE: &str = "in is non-cached input; cached tokens are listed apart (cache r/w = read/written) and priced at 0.1x / 1.25x-2x of input; cost is an estimate from the published price table, blank for models it does not list";
 
-/// The tools `oc stats --model` knows, in print order: `(source, title, footnote)`.
-const SOURCES: [(&str, &str, &str); 2] = [("opencode", "opencode", OPENCODE_NOTE), ("claude-code", "claude code", CLAUDE_NOTE)];
+type Table = fn(&[&ModelStats], &Paint, &str) -> String;
+
+/// The tools `oc stats --model` knows, in print order: `(source, title, footnote, table)`.
+const SOURCES: [(&str, &str, &str, Table); 2] = [
+    ("opencode", "opencode", OPENCODE_NOTE, model_table),
+    ("claude-code", "claude code", CLAUDE_NOTE, claude_table),
+];
 
 /// `oc stats --model`: the same table per model, one titled table per source (opencode, then claude code), each with
 /// its own total; sources without usage are left out. The name column grows to the longest model id.
@@ -149,9 +179,15 @@ pub fn render_models(stats: &[ModelStats], color: bool) -> String {
     let p = Paint(color);
     let tables: Vec<String> = SOURCES
         .iter()
-        .filter_map(|(source, title, note)| {
+        .filter_map(|(source, title, note, table)| {
             let rows: Vec<&ModelStats> = stats.iter().filter(|s| s.source == *source).collect();
-            (!rows.is_empty()).then(|| format!("{}\n{}", p.cell("1", title, 0, false), model_table(&rows, &p, note)))
+            (!rows.is_empty()).then(|| {
+                format!(
+                    "{}\n{}",
+                    p.cell("1", title, 0, false),
+                    table(&rows, &p, note)
+                )
+            })
         })
         .collect();
     if tables.is_empty() {
@@ -165,7 +201,12 @@ fn model_table(rows: &[&ModelStats], p: &Paint, note: &str) -> String {
     let mut rows: Vec<&ModelStats> = rows.to_vec();
     rows.sort_by(|a, b| total(b).cmp(&total(a)).then_with(|| a.model.cmp(&b.model)));
     let top = rows.first().map_or(0, |s| total(s));
-    let width = rows.iter().map(|s| s.model.chars().count()).max().unwrap_or(0).max(20);
+    let width = rows
+        .iter()
+        .map(|s| s.model.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(20);
     let head = |s: &str, w: usize, right: bool| p.cell("1;36", s, w, right);
     let mut out = format!(
         "{} {} {} {} {} {} {}\n",
@@ -185,8 +226,18 @@ fn model_table(rows: &[&ModelStats], p: &Paint, note: &str) -> String {
     for s in &rows {
         out.push_str(&format!(
             "{} {} {} {} {} {} {}\n",
-            p.cell(&format!("1;{}", agent_code(&s.model)), &s.model, width, false),
-            p.cell("37", &tokens_cell(Some(s.tokens_in), Some(s.tokens_out)), 15, true),
+            p.cell(
+                &format!("1;{}", agent_code(&s.model)),
+                &s.model,
+                width,
+                false
+            ),
+            p.cell(
+                "37",
+                &tokens_cell(Some(s.tokens_in), Some(s.tokens_out)),
+                15,
+                true
+            ),
             bar_cell(p, total(s), top),
             p.cell("33", &cost_cell(s.cost_usd), 10, true),
             p.cell("90", &blank_zero(s.turns), 5, true),
@@ -195,14 +246,114 @@ fn model_table(rows: &[&ModelStats], p: &Paint, note: &str) -> String {
         ));
     }
     // fold from +0.0: an empty f64 sum is -0.0 and printed as `~$-0.0000`
-    let cost = rows.iter().filter_map(|s| s.cost_usd).fold(0.0, |a, c| a + c);
+    let cost = rows
+        .iter()
+        .filter_map(|s| s.cost_usd)
+        .fold(0.0, |a, c| a + c);
     out.push_str(&format!(
         "{} {} {} {} {}\n",
         p.cell("1", "total", width, false),
-        p.cell("1", &tokens_cell(Some(rows.iter().map(|s| s.tokens_in).sum()), Some(rows.iter().map(|s| s.tokens_out).sum())), 15, true),
+        p.cell(
+            "1",
+            &tokens_cell(
+                Some(rows.iter().map(|s| s.tokens_in).sum()),
+                Some(rows.iter().map(|s| s.tokens_out).sum())
+            ),
+            15,
+            true
+        ),
         " ".repeat(BAR),
         p.cell("1;33", &cost_cell(Some(cost)), 10, true),
-        p.cell("1", &blank_zero(rows.iter().map(|s| s.turns).sum()), 5, true),
+        p.cell(
+            "1",
+            &blank_zero(rows.iter().map(|s| s.turns).sum()),
+            5,
+            true
+        ),
+    ));
+    out.push_str(&p.cell("90", note, 0, false));
+    out.push('\n');
+    out
+}
+
+/// The `claude code` table: non-cached `in`, `out` and `cache r/w` apart, so a cached prompt is not counted as input.
+fn claude_table(rows: &[&ModelStats], p: &Paint, note: &str) -> String {
+    let total = |s: &ModelStats| s.tokens_in + s.tokens_out + s.cache_read + s.cache_write;
+    let mut rows: Vec<&ModelStats> = rows.to_vec();
+    rows.sort_by(|a, b| total(b).cmp(&total(a)).then_with(|| a.model.cmp(&b.model)));
+    let top = rows.first().map_or(0, |s| total(s));
+    let width = rows
+        .iter()
+        .map(|s| s.model.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(20);
+    let head = |s: &str, w: usize, right: bool| p.cell("1;36", s, w, right);
+    let mut out = format!(
+        "{} {} {} {} {} {} {} {}\n",
+        head("model", width, false),
+        head("in", 8, true),
+        head("out", 8, true),
+        head("cache r/w", 15, true),
+        head("share", BAR, false),
+        head("cost", 10, true),
+        head("turns", 5, true),
+        head("sessions", 8, true),
+    );
+    let line = |name: &str,
+                code: &str,
+                s: (i64, i64, i64, i64),
+                cost: &str,
+                turns: i64,
+                sessions: Option<i64>,
+                bold: bool,
+                bar: String| {
+        let (white, grey) = if bold { ("1", "1") } else { ("37", "90") };
+        format!(
+            "{} {} {} {} {} {} {} {}\n",
+            p.cell(code, name, width, false),
+            p.cell(white, &tok(s.0), 8, true),
+            p.cell(white, &tok(s.1), 8, true),
+            p.cell(white, &format!("{}/{}", tok(s.2), tok(s.3)), 15, true),
+            bar,
+            p.cell(if bold { "1;33" } else { "33" }, cost, 10, true),
+            p.cell(grey, &blank_zero(turns), 5, true),
+            p.cell(grey, &sessions.map_or(String::new(), blank_zero), 8, true),
+        )
+    };
+    for s in &rows {
+        out.push_str(&line(
+            &s.model,
+            &format!("1;{}", agent_code(&s.model)),
+            (s.tokens_in, s.tokens_out, s.cache_read, s.cache_write),
+            &cost_cell(s.cost_usd),
+            s.turns,
+            Some(s.tasks),
+            false,
+            bar_cell(p, total(s), top),
+        ));
+    }
+    let sum = |f: fn(&ModelStats) -> i64| rows.iter().map(|s| f(s)).sum::<i64>();
+    // fold from +0.0: an empty f64 sum is -0.0 and printed as `~$-0.0000`
+    let cost = rows
+        .iter()
+        .filter_map(|s| s.cost_usd)
+        .fold(0.0, |a, c| a + c);
+    let totals = (
+        sum(|s| s.tokens_in),
+        sum(|s| s.tokens_out),
+        sum(|s| s.cache_read),
+        sum(|s| s.cache_write),
+    );
+    out.push_str(&line(
+        "total",
+        "1",
+        totals,
+        &cost_cell(Some(cost)),
+        sum(|s| s.turns),
+        None,
+        true,
+        " ".repeat(BAR),
     ));
     out.push_str(&p.cell("90", note, 0, false));
     out.push('\n');
@@ -214,13 +365,34 @@ mod tests {
     use super::*;
 
     fn agent(name: &str, i: Option<i64>, o: Option<i64>, cost: Option<f64>) -> AgentStats {
-        AgentStats { agent: name.into(), tokens_in: i, tokens_out: o, cost_usd: cost, ..Default::default() }
+        AgentStats {
+            agent: name.into(),
+            tokens_in: i,
+            tokens_out: o,
+            cost_usd: cost,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn agents_are_listed_from_most_tokens_to_least() {
-        let out = render(&[agent("small", Some(10), Some(1), None), agent("big", Some(1_000_000), Some(5), Some(1.0)), AgentStats { agent: "none".into(), received: 1, ..Default::default() }], false);
-        let (big, small, none) = (out.find("big").unwrap(), out.find("small").unwrap(), out.find("none").unwrap());
+        let out = render(
+            &[
+                agent("small", Some(10), Some(1), None),
+                agent("big", Some(1_000_000), Some(5), Some(1.0)),
+                AgentStats {
+                    agent: "none".into(),
+                    received: 1,
+                    ..Default::default()
+                },
+            ],
+            false,
+        );
+        let (big, small, none) = (
+            out.find("big").unwrap(),
+            out.find("small").unwrap(),
+            out.find("none").unwrap(),
+        );
         assert!(big < small && small < none, "{out}");
     }
 
@@ -235,16 +407,37 @@ mod tests {
 
     #[test]
     fn unknown_values_are_blank_not_na() {
-        let out = render(&[AgentStats { agent: "mentor".into(), received: 2, completed: 1, ..Default::default() }], false);
+        let out = render(
+            &[AgentStats {
+                agent: "mentor".into(),
+                received: 2,
+                completed: 1,
+                ..Default::default()
+            }],
+            false,
+        );
         assert!(out.contains("mentor") && !out.contains("n/a"), "{out}");
     }
 
     #[test]
     fn the_biggest_agent_has_a_full_bar_and_the_total_sums_up() {
-        let out = render(&[agent("a", Some(1_500_000), Some(2_000), Some(0.6)), agent("b", Some(500), Some(100), None)], false);
+        let out = render(
+            &[
+                agent("a", Some(1_500_000), Some(2_000), Some(0.6)),
+                agent("b", Some(500), Some(100), None),
+            ],
+            false,
+        );
         assert!(out.contains(&"█".repeat(BAR)), "{out}");
-        assert!(out.contains("1.5M/2.0k") && out.contains("500/100") && out.contains("~$0.6000"), "{out}");
-        assert!(out.lines().any(|l| l.starts_with("total") && l.contains("1.5M/2.1k")), "{out}");
+        assert!(
+            out.contains("1.5M/2.0k") && out.contains("500/100") && out.contains("~$0.6000"),
+            "{out}"
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("total") && l.contains("1.5M/2.1k")),
+            "{out}"
+        );
     }
 
     #[test]
@@ -261,11 +454,25 @@ mod tests {
     }
 
     fn model(name: &str, i: i64, o: i64, cost: Option<f64>) -> ModelStats {
-        ModelStats { source: "opencode".into(), model: name.into(), tokens_in: i, tokens_out: o, cost_usd: cost, turns: 2, tasks: 1, agents: 1 }
+        ModelStats {
+            source: "opencode".into(),
+            model: name.into(),
+            tokens_in: i,
+            tokens_out: o,
+            cost_usd: cost,
+            turns: 2,
+            tasks: 1,
+            agents: 1,
+            cache_read: 0,
+            cache_write: 0,
+        }
     }
 
     fn claude(name: &str, i: i64, o: i64) -> ModelStats {
-        ModelStats { source: "claude-code".into(), ..model(name, i, o, None) }
+        ModelStats {
+            source: "claude-code".into(),
+            ..model(name, i, o, None)
+        }
     }
 
     /// The table without its title line: what `oc stats --model` printed before the split by source.
@@ -275,39 +482,121 @@ mod tests {
 
     #[test]
     fn each_source_gets_its_own_titled_table_with_its_own_total_and_footnote() {
-        let out = render_models(&[claude("claude-sonnet-5-5", 9_000, 100), model("big", 1_500_000, 2_000, Some(0.6)), model("small", 10, 1, None)], false);
-        let (oc, cc) = (out.find("opencode\n").unwrap(), out.find("claude code\n").unwrap());
+        let sonnet = ModelStats {
+            cache_read: 80_400_000,
+            cache_write: 2_000_000,
+            ..claude("claude-sonnet-5-5", 9_000, 100)
+        };
+        let out = render_models(
+            &[
+                sonnet,
+                model("big", 1_500_000, 2_000, Some(0.6)),
+                model("small", 10, 1, None),
+            ],
+            false,
+        );
+        let (oc, cc) = (
+            out.find("opencode\n").unwrap(),
+            out.find("claude code\n").unwrap(),
+        );
         assert!(oc < cc && out.starts_with("opencode\n"), "{out}");
         let totals: Vec<&str> = out.lines().filter(|l| l.starts_with("total")).collect();
-        assert!(totals.len() == 2 && totals[0].contains("1.5M/2.0k") && totals[1].contains("9.0k/100"), "{out}");
-        assert!(out[..cc].contains("opencode's figure") && !out[..cc].contains("include cache"), "{out}");
-        assert!(out[cc..].contains("include cache") && !out[cc..].contains("opencode's figure"), "{out}");
-        assert!(!out[..cc].contains("claude-sonnet-5-5") && !out[cc..].contains("big"), "{out}");
+        assert!(
+            totals.len() == 2
+                && totals[0].contains("1.5M/2.0k")
+                && totals[1].contains("80.4M/2.0M"),
+            "{out}"
+        );
+        assert!(
+            totals[1].contains("9.0k") && totals[1].contains("100"),
+            "in and out are their own columns: {out}"
+        );
+        assert!(
+            out[..cc].contains("opencode's figure") && !out[..cc].contains("cache r/w"),
+            "{out}"
+        );
+        assert!(
+            out[cc..].contains("cached tokens are listed apart")
+                && !out[cc..].contains("opencode's figure"),
+            "{out}"
+        );
+        let header = out[cc..]
+            .lines()
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            header,
+            [
+                "model", "in", "out", "cache", "r/w", "share", "cost", "turns", "sessions"
+            ],
+            "{out}"
+        );
+        assert!(
+            !out[..cc].contains("claude-sonnet-5-5") && !out[cc..].contains("big"),
+            "{out}"
+        );
     }
 
     #[test]
     fn the_opencode_table_is_what_the_single_table_used_to_be() {
-        let rows = [model("small", 10, 1, None), model("big", 1_500_000, 2_000, Some(0.6))];
-        let with_claude = render_models(&[rows[0].clone(), rows[1].clone(), claude("c", 5, 5)], false);
+        let rows = [
+            model("small", 10, 1, None),
+            model("big", 1_500_000, 2_000, Some(0.6)),
+        ];
+        let with_claude = render_models(
+            &[rows[0].clone(), rows[1].clone(), claude("c", 5, 5)],
+            false,
+        );
         let alone = render_models(&rows, false);
         let table = without_title(&alone);
-        assert!(table.starts_with("model") && table.ends_with("published price table\n"), "{alone}");
-        assert!(without_title(&with_claude).starts_with(table), "{with_claude}");
+        assert!(
+            table.starts_with("model") && table.ends_with("published price table\n"),
+            "{alone}"
+        );
+        assert!(
+            without_title(&with_claude).starts_with(table),
+            "{with_claude}"
+        );
     }
 
     #[test]
     fn an_empty_source_is_skipped_and_only_claude_usage_prints_only_its_table() {
         let out = render_models(&[claude("c", 5, 5)], false);
-        assert!(out.starts_with("claude code\n") && !out.contains("opencode") && !out.contains("no usage"), "{out}");
+        assert!(
+            out.starts_with("claude code\n")
+                && !out.contains("opencode")
+                && !out.contains("no usage"),
+            "{out}"
+        );
     }
 
     #[test]
     fn models_are_listed_from_most_tokens_to_least_with_a_total() {
-        let out = render_models(&[model("small", 10, 1, None), model("big", 1_500_000, 2_000, Some(0.6)), model("unknown", 5, 0, None)], false);
-        let (big, small, unknown) = (out.find("big").unwrap(), out.find("small").unwrap(), out.find("unknown").unwrap());
+        let out = render_models(
+            &[
+                model("small", 10, 1, None),
+                model("big", 1_500_000, 2_000, Some(0.6)),
+                model("unknown", 5, 0, None),
+            ],
+            false,
+        );
+        let (big, small, unknown) = (
+            out.find("big").unwrap(),
+            out.find("small").unwrap(),
+            out.find("unknown").unwrap(),
+        );
         assert!(big < small && small < unknown, "{out}");
-        assert!(out.contains(&"█".repeat(BAR)) && out.contains("~$0.6000"), "{out}");
-        assert!(out.lines().any(|l| l.starts_with("total") && l.contains("1.5M/2.0k")), "{out}");
+        assert!(
+            out.contains(&"█".repeat(BAR)) && out.contains("~$0.6000"),
+            "{out}"
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("total") && l.contains("1.5M/2.0k")),
+            "{out}"
+        );
     }
 
     #[test]
@@ -315,14 +604,22 @@ mod tests {
         let long = "github-copilot/claude-sonnet-5.5-with-a-very-long-suffix";
         let out = render_models(&[model(long, 100, 10, None), model("a", 1, 1, None)], false);
         assert!(out.contains(long), "{out}");
-        let col: Vec<_> = out.lines().filter_map(|l| l.chars().position(|c| c == '█')).collect();
+        let col: Vec<_> = out
+            .lines()
+            .filter_map(|l| l.chars().position(|c| c == '█'))
+            .collect();
         assert!(col.len() == 2 && col[0] == col[1], "{out}");
     }
 
     #[test]
     fn models_without_usage_say_so() {
         let out = render_models(&[], false);
-        assert!(out.starts_with("model") && out.contains("no usage recorded yet") && !out.contains("total"), "{out}");
+        assert!(
+            out.starts_with("model")
+                && out.contains("no usage recorded yet")
+                && !out.contains("total"),
+            "{out}"
+        );
     }
 
     #[test]

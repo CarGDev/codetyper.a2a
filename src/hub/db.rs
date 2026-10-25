@@ -1,6 +1,8 @@
 //! SQLite state shared by the hub, the dispatcher and `oc` (one WAL file, many processes).
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{Connection, OptionalExtension, Row, params_from_iter, types::Value as Sql};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Row, params_from_iter, types::Value as Sql,
+};
 use std::path::Path;
 use std::time::Duration;
 
@@ -66,7 +68,9 @@ pub fn iso_ago_ms(ms: i64) -> String {
 }
 
 pub fn parse_ms(iso: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc3339(iso).map(|d| d.timestamp_millis()).unwrap_or(0)
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .map(|d| d.timestamp_millis())
+        .unwrap_or(0)
 }
 
 pub fn task_from_row(r: &Row) -> rusqlite::Result<TaskRow> {
@@ -104,14 +108,18 @@ pub fn session_from_row(r: &Row) -> rusqlite::Result<SessionRow> {
     })
 }
 
-pub const SESSION_COLS: &str = "agent, directory, session_id, tmux_target, status, created_at, backend";
+pub const SESSION_COLS: &str =
+    "agent, directory, session_id, tmux_target, status, created_at, backend";
 
 /// `SELECT <cols> FROM tasks <tail>` with positional text params.
 pub fn tasks(conn: &Connection, tail: &str, params: &[&str]) -> Result<Vec<TaskRow>, String> {
     let sql = format!("SELECT {TASK_COLS} FROM tasks {tail}");
     let mut st = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = st
-        .query_map(params_from_iter(params.iter().map(|p| Sql::Text(p.to_string()))), task_from_row)
+        .query_map(
+            params_from_iter(params.iter().map(|p| Sql::Text(p.to_string()))),
+            task_from_row,
+        )
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
@@ -124,23 +132,27 @@ pub fn sessions(conn: &Connection, tail: &str, params: &[&str]) -> Result<Vec<Se
     let sql = format!("SELECT {SESSION_COLS} FROM sessions {tail}");
     let mut st = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = st
-        .query_map(params_from_iter(params.iter().map(|p| Sql::Text(p.to_string()))), session_from_row)
+        .query_map(
+            params_from_iter(params.iter().map(|p| Sql::Text(p.to_string()))),
+            session_from_row,
+        )
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<_, _>>().map_err(|e| e.to_string())
 }
 
 #[allow(dead_code)]
 fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
-    let Ok(mut st) = conn.prepare(&format!("PRAGMA table_info({table})")) else { return false };
+    let Ok(mut st) = conn.prepare(&format!("PRAGMA table_info({table})")) else {
+        return false;
+    };
     st.query_map([], |r| r.get::<_, String>(1))
         .map(|rows| rows.flatten().any(|c| c == col))
         .unwrap_or(false)
 }
 
+pub const SCHEMA_VERSION: i64 = 6;
 
-pub const SCHEMA_VERSION: i64 = 5;
-
-/// The current schema (v5) of `a2a_hub.dbml`. Timestamps are fixed-width ISO-8601 UTC text, JSON columns are
+/// The current schema (v6) of `a2a_hub.dbml`. Timestamps are fixed-width ISO-8601 UTC text, JSON columns are
 /// checked with json_valid(). `events` carries no foreign keys on purpose: it is append-only
 /// and best-effort, so tracing can never fail a call.
 const SCHEMA: &str = "
@@ -246,7 +258,9 @@ CREATE TABLE events (
   cost_usd REAL,
   model TEXT,
   source TEXT,
-  ref TEXT
+  ref TEXT,
+  tokens_cache_read INTEGER,
+  tokens_cache_write INTEGER
 );
 CREATE INDEX idx_events_task ON events(task_id, id);
 CREATE INDEX idx_events_context ON events(context_id, id);
@@ -348,6 +362,16 @@ const UPGRADE_V4_TO_V5: &str = "
 ALTER TABLE sessions ADD COLUMN backend TEXT;
 ";
 
+/// v5 -> v6: prompt-cache token counts in their own columns (NULL where the source has none). Claude Code rows of
+/// v4/v5 summed cache into `tokens_in`; they are derived from the transcripts, so they and their read positions are
+/// dropped and the next ingest rebuilds them exactly. Rows of other sources are untouched.
+const UPGRADE_V5_TO_V6: &str = "
+ALTER TABLE events ADD COLUMN tokens_cache_read INTEGER;
+ALTER TABLE events ADD COLUMN tokens_cache_write INTEGER;
+DELETE FROM events WHERE source = 'claude-code';
+DELETE FROM ingest_offsets WHERE source = 'claude-code';
+";
+
 const BACKFILL_MODEL: &str = "
 UPDATE events SET model = json_extract(detail, '$.model')
 WHERE kind = 'usage' AND model IS NULL AND json_valid(detail)
@@ -355,11 +379,16 @@ WHERE kind = 'usage' AND model IS NULL AND json_valid(detail)
 ";
 
 fn user_version(conn: &Connection) -> Result<i64, String> {
-    conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(|e| e.to_string())
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| e.to_string())
 }
 
 fn table_exists(conn: &Connection, name: &str) -> bool {
-    exists(conn, "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", &[name])
+    exists(
+        conn,
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        &[name],
+    )
 }
 
 /// `<db><suffix>` next to the file, once: a later migration never overwrites an older backup. Best
@@ -391,20 +420,28 @@ fn upgrade_from(conn: &Connection, path: &Path, from: i64) -> Result<(), String>
     if from == 4 {
         backup(path, ".bak-v4");
     }
-    run(UPGRADE_V4_TO_V5)?;
+    if from <= 4 {
+        run(UPGRADE_V4_TO_V5)?;
+    }
+    if from == 5 {
+        backup(path, ".bak-v5");
+    }
+    run(UPGRADE_V5_TO_V6)?;
     run(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
 }
 
 /// Bring the file to SCHEMA_VERSION, one step per version. Safe with several processes starting at
 /// once: the version is re-read inside the write transaction, so only one of them migrates. A v1
-/// file is copied to `<db>.bak-v1` first, a v2 file to `<db>.bak-v2`, a v3 file to `<db>.bak-v3`, a v4 file to `<db>.bak-v4`. Foreign keys are off while
+/// file is copied to `<db>.bak-v1` first, a v2 file to `<db>.bak-v2`, a v3 file to `<db>.bak-v3`, a v4 file to `<db>.bak-v4`, a v5 file to `<db>.bak-v5`. Foreign keys are off while
 /// tables are rebuilt.
 fn migrate(conn: &Connection, path: &Path) -> Result<(), String> {
     if user_version(conn)? >= SCHEMA_VERSION {
         return Ok(());
     }
-    conn.execute_batch("PRAGMA foreign_keys = OFF").map_err(|e| e.to_string())?;
-    conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF")
+        .map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| e.to_string())?;
     let run = || -> Result<(), String> {
         let v = user_version(conn)?;
         if v >= SCHEMA_VERSION {
@@ -416,14 +453,18 @@ fn migrate(conn: &Connection, path: &Path) -> Result<(), String> {
         let legacy = table_exists(conn, "tasks");
         if legacy {
             backup(path, ".bak-v1");
-            conn.execute_batch(UPGRADE_V1_TO_V2).map_err(|e| e.to_string())?;
+            conn.execute_batch(UPGRADE_V1_TO_V2)
+                .map_err(|e| e.to_string())?;
         }
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
         if legacy {
-            conn.execute_batch(COPY_V1_TO_V2).map_err(|e| e.to_string())?;
-            conn.execute_batch(BACKFILL_MODEL).map_err(|e| e.to_string())?;
+            conn.execute_batch(COPY_V1_TO_V2)
+                .map_err(|e| e.to_string())?;
+            conn.execute_batch(BACKFILL_MODEL)
+                .map_err(|e| e.to_string())?;
         }
-        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}")).map_err(|e| e.to_string())
+        conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
+            .map_err(|e| e.to_string())
     };
     match run() {
         Ok(()) => conn.execute_batch("COMMIT").map_err(|e| e.to_string()),
@@ -437,11 +478,32 @@ fn migrate(conn: &Connection, path: &Path) -> Result<(), String> {
 /// Open (creating if needed) the shared database. `busy_timeout` is set BEFORE anything that
 /// takes a lock, or two processes starting at once fail with "database is locked".
 pub fn open(path: &Path) -> Result<Connection, String> {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    open_inner(path, true)
+}
+
+/// Open after a caller has already acquired the migration lock and handled legacy state.
+pub fn open_after_migration(path: &Path) -> Result<Connection, String> {
+    open_inner(path, false)
+}
+
+fn open_inner(path: &Path, migrate_legacy: bool) -> Result<Connection, String> {
+    if migrate_legacy
+        && std::env::var_os("A2A_DB").is_none()
+        && path == crate::paths::runtime_home().join("hub.db")
+    {
+        crate::paths::migrate_legacy(&crate::paths::runtime_home(), &crate::paths::legacy_home())?;
+    }
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        if path.starts_with(crate::paths::runtime_home()) {
+            crate::paths::ensure_private_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        } else {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
     }
     let conn = Connection::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    conn.busy_timeout(Duration::from_millis(8000)).map_err(|e| e.to_string())?;
+    crate::paths::ensure_private_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    conn.busy_timeout(Duration::from_millis(8000))
+        .map_err(|e| e.to_string())?;
     for attempt in 0.. {
         match conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0)) {
             Ok(_) => break,
@@ -450,8 +512,34 @@ pub fn open(path: &Path) -> Result<Connection, String> {
         }
     }
     migrate(&conn, path)?;
-    conn.execute_batch("PRAGMA foreign_keys = ON").map_err(|e| e.to_string())?;
+    conn.execute_batch("PRAGMA foreign_keys = ON")
+        .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+/// Open the legacy database read-only during the one-release compatibility window.
+pub fn open_read_compat(path: &Path) -> Result<(Connection, Option<String>), String> {
+    if std::env::var_os("A2A_DB").is_none() && path == crate::paths::runtime_home().join("hub.db") {
+        let owner = crate::paths::resolve_runtime_home(
+            &crate::paths::runtime_home(),
+            &crate::paths::legacy_home(),
+        );
+        if owner.legacy {
+            if let Some((legacy, warning)) = crate::paths::legacy_read_database(
+                &crate::paths::runtime_home(),
+                &crate::paths::legacy_home(),
+            )? {
+                let conn = Connection::open_with_flags(&legacy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|e| format!("{}: {e}", legacy.display()))?;
+                return Ok((conn, Some(warning)));
+            }
+        }
+    }
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    conn.busy_timeout(Duration::from_millis(8000))
+        .map_err(|e| e.to_string())?;
+    Ok((conn, None))
 }
 
 /// Foreign keys need the rows a task points at; create placeholders (`INSERT OR IGNORE`, so a real
@@ -519,6 +607,8 @@ pub struct SourcedUsage<'a> {
     pub session: &'a str,
     pub tokens_in: i64,
     pub tokens_out: i64,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
     pub cost_usd: Option<f64>,
     pub model: &'a str,
     pub detail: &'a str,
@@ -527,18 +617,22 @@ pub struct SourcedUsage<'a> {
 /// Insert a usage event of another source; false when that (source, reference) is already stored.
 pub fn record_usage_from(conn: &Connection, u: &SourcedUsage) -> bool {
     conn.execute(
-        "INSERT OR IGNORE INTO events (ts, task_id, kind, detail, tokens_in, tokens_out, cost_usd, model, source, ref) VALUES (?,?,'usage',?,?,?,?,?,?,?)",
-        rusqlite::params![u.ts, u.session, u.detail, u.tokens_in, u.tokens_out, u.cost_usd, u.model, u.source, u.reference],
+        "INSERT OR IGNORE INTO events (ts, task_id, kind, detail, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write, cost_usd, model, source, ref) VALUES (?,?,'usage',?,?,?,?,?,?,?,?,?)",
+        rusqlite::params![u.ts, u.session, u.detail, u.tokens_in, u.tokens_out, u.cache_read, u.cache_write, u.cost_usd, u.model, u.source, u.reference],
     )
     .is_ok_and(|n| n > 0)
 }
 
 pub fn exists(conn: &Connection, sql: &str, params: &[&str]) -> bool {
-    conn.query_row(sql, params_from_iter(params.iter().map(|p| Sql::Text(p.to_string()))), |_| Ok(()))
-        .optional()
-        .ok()
-        .flatten()
-        .is_some()
+    conn.query_row(
+        sql,
+        params_from_iter(params.iter().map(|p| Sql::Text(p.to_string()))),
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 #[cfg(test)]
@@ -549,14 +643,62 @@ mod tests {
     fn record_event_stores_a_row_and_never_panics_without_a_table() {
         let dir = std::env::temp_dir().join(format!("a2a-db-ev-{}", std::process::id()));
         let conn = open(&dir.join("t.db")).unwrap();
-        record_event(&conn, Some("t1"), Some("c1"), "task_created", Some("a"), Some("b"));
+        record_event(
+            &conn,
+            Some("t1"),
+            Some("c1"),
+            "task_created",
+            Some("a"),
+            Some("b"),
+        );
         let (k, d, tin): (String, String, Option<i64>) = conn
-            .query_row("SELECT kind, detail, tokens_in FROM events WHERE task_id='t1'", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_row(
+                "SELECT kind, detail, tokens_in FROM events WHERE task_id='t1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
         assert_eq!((k.as_str(), d.as_str(), tin), ("task_created", "b", None));
         conn.execute("DROP TABLE events", []).unwrap();
         record_event(&conn, None, None, "x", None, None); // swallowed
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn db_overrides_do_not_restrict_external_parents_or_reject_relative_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("a2a-db-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let external = root.join("external.db");
+        open(&external).unwrap();
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let relative = format!("a2a-relative-{}.db", std::process::id());
+        drop(open(Path::new(&relative)).unwrap());
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{relative}{suffix}"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_compat_opener_rejects_writes() {
+        let dir = std::env::temp_dir().join(format!("a2a-db-read-only-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("hub.db");
+        drop(open(&path).unwrap());
+        let (conn, warning) = open_read_compat(&path).unwrap();
+        assert!(warning.is_none());
+        assert!(
+            conn.execute("CREATE TABLE should_not_write (id INTEGER)", [])
+                .is_err()
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn temp_db(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -576,18 +718,24 @@ mod tests {
     }
 
     fn model_of(conn: &Connection, detail: &str) -> Option<String> {
-        conn.query_row("SELECT model FROM events WHERE detail = ?", [detail], |r| r.get(0)).unwrap()
+        conn.query_row("SELECT model FROM events WHERE detail = ?", [detail], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     fn event_columns(conn: &Connection) -> Vec<String> {
         let mut st = conn.prepare("PRAGMA table_info(events)").unwrap();
-        st.query_map([], |r| r.get::<_, String>(1)).unwrap().flatten().collect()
+        st.query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .flatten()
+            .collect()
     }
 
-    /// Turn a freshly created database into the schema-4 shape: no `sessions.backend`, version 4.
+    /// Turn a freshly created database into the schema-4 shape: no cache columns, no `sessions.backend`, version 4.
     fn downgrade_to_v4(path: &Path) {
         let conn = Connection::open(path).unwrap();
-        conn.execute_batch("ALTER TABLE sessions DROP COLUMN backend; PRAGMA user_version = 4;").unwrap();
+        conn.execute_batch("ALTER TABLE events DROP COLUMN tokens_cache_read; ALTER TABLE events DROP COLUMN tokens_cache_write; ALTER TABLE sessions DROP COLUMN backend; PRAGMA user_version = 4;").unwrap();
     }
 
     /// Turn a freshly created database into the schema-3 shape: no `source`, `ref`, ingest table, version 3.
@@ -614,11 +762,15 @@ mod tests {
         let conn = open(&path).unwrap();
         let version = user_version(&conn).unwrap();
         let columns = event_columns(&conn);
-        let index = exists(&conn, "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?", &["idx_events_model"]);
+        let index = exists(
+            &conn,
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?",
+            &["idx_events_model"],
+        );
         insert_old_style(&conn, "usage", Some("old")); // an older binary's INSERT still works
         let old_model = model_of(&conn, "old");
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert!(columns.contains(&"model".to_string()), "{columns:?}");
         assert!(index);
         assert_eq!(old_model, None);
@@ -628,7 +780,17 @@ mod tests {
     fn record_usage_stores_the_model_in_its_column() {
         let (dir, path) = temp_db("usage");
         let conn = open(&path).unwrap();
-        record_usage(&conn, "t1", "c1", "build", 10, 2, Some(0.5), Some("openai/gpt-5.6-luna"), "{}");
+        record_usage(
+            &conn,
+            "t1",
+            "c1",
+            "build",
+            10,
+            2,
+            Some(0.5),
+            Some("openai/gpt-5.6-luna"),
+            "{}",
+        );
         record_usage(&conn, "t2", "c1", "build", 10, 2, None, None, "{}");
         let models: Vec<Option<String>> = conn
             .prepare("SELECT model FROM events WHERE kind = 'usage' ORDER BY id")
@@ -664,16 +826,32 @@ mod tests {
             model_of(&conn, r#"{"model":7}"#),
             model_of(&conn, r#"{"model":"a/not-usage"}"#),
         ];
-        let index = exists(&conn, "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?", &["idx_events_model"]);
-        let (version, rows) = (user_version(&conn).unwrap(), conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap());
+        let index = exists(
+            &conn,
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?",
+            &["idx_events_model"],
+        );
+        let (version, rows) = (
+            user_version(&conn).unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+        );
         let backup = path.with_extension("db.bak-v2").exists();
         drop(conn);
         let again = open(&path).unwrap(); // idempotent
-        let (version2, rows2) = (user_version(&again).unwrap(), again.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0)).unwrap());
+        let (version2, rows2) = (
+            user_version(&again).unwrap(),
+            again
+                .query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+        );
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(got, [Some("a/known".to_string()), None, None, None, None, None]);
+        assert_eq!(
+            got,
+            [Some("a/known".to_string()), None, None, None, None, None]
+        );
         assert!(index && backup);
-        assert_eq!((version, rows, version2, rows2), (5, 6, 5, 6));
+        assert_eq!((version, rows, version2, rows2), (6, 6, 6, 6));
     }
 
     #[test]
@@ -686,15 +864,33 @@ mod tests {
         drop(raw);
         let conn = open(&path).unwrap();
         let (version, columns) = (user_version(&conn).unwrap(), event_columns(&conn));
-        let source: Option<String> = conn.query_row("SELECT source FROM events WHERE detail = 'kept'", [], |r| r.get(0)).unwrap();
-        let indexes = ["idx_events_source_model", "idx_events_source_ref"]
-            .map(|i| exists(&conn, "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?", &[i]));
+        let source: Option<String> = conn
+            .query_row("SELECT source FROM events WHERE detail = 'kept'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let indexes = ["idx_events_source_model", "idx_events_source_ref"].map(|i| {
+            exists(
+                &conn,
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?",
+                &[i],
+            )
+        });
         let offsets = table_exists(&conn, "ingest_offsets");
-        let backups = (path.with_extension("db.bak-v3").exists(), path.with_extension("db.bak-v2").exists());
+        let backups = (
+            path.with_extension("db.bak-v3").exists(),
+            path.with_extension("db.bak-v2").exists(),
+        );
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(version, 5);
-        assert!(columns.contains(&"source".to_string()) && columns.contains(&"ref".to_string()), "{columns:?}");
-        assert_eq!(source, None, "NULL source is read as opencode, not backfilled");
+        assert_eq!(version, 6);
+        assert!(
+            columns.contains(&"source".to_string()) && columns.contains(&"ref".to_string()),
+            "{columns:?}"
+        );
+        assert_eq!(
+            source, None,
+            "NULL source is read as opencode, not backfilled"
+        );
         assert_eq!(indexes, [true, true]);
         assert!(offsets);
         assert_eq!(backups, (true, false));
@@ -714,14 +910,26 @@ mod tests {
         drop(raw);
         let conn = open(&path).unwrap();
         let version = user_version(&conn).unwrap();
-        let backend: Option<String> = conn.query_row("SELECT backend FROM sessions WHERE session_id = 'ses_old'", [], |r| r.get(0)).unwrap();
-        let backups = (path.with_extension("db.bak-v4").exists(), path.with_extension("db.bak-v3").exists());
+        let backend: Option<String> = conn
+            .query_row(
+                "SELECT backend FROM sessions WHERE session_id = 'ses_old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let backups = (
+            path.with_extension("db.bak-v4").exists(),
+            path.with_extension("db.bak-v3").exists(),
+        );
         drop(conn);
         let again = open(&path).unwrap(); // second open: no-op
         let version2 = user_version(&again).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!((version, version2), (5, 5));
-        assert_eq!(backend, None, "NULL backend is read as opencode, not backfilled");
+        assert_eq!((version, version2), (6, 6));
+        assert_eq!(
+            backend, None,
+            "NULL backend is read as opencode, not backfilled"
+        );
         assert_eq!(backups, (true, false));
     }
 
@@ -733,12 +941,29 @@ mod tests {
         let conn = open(&path).unwrap();
         let (version, columns) = (user_version(&conn).unwrap(), event_columns(&conn));
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(version, 5);
-        assert!(["model", "source", "ref"].iter().all(|c| columns.contains(&c.to_string())), "{columns:?}");
+        assert_eq!(version, 6);
+        assert!(
+            ["model", "source", "ref"]
+                .iter()
+                .all(|c| columns.contains(&c.to_string())),
+            "{columns:?}"
+        );
     }
 
     fn sourced<'a>(reference: &'a str, tokens_in: i64) -> SourcedUsage<'a> {
-        SourcedUsage { source: "claude-code", reference, ts: "2026-10-24T00:00:00.000Z", session: "s1", tokens_in, tokens_out: 1, cost_usd: None, model: "claude-sonnet-5-5", detail: "{}" }
+        SourcedUsage {
+            source: "claude-code",
+            reference,
+            ts: "2026-10-24T00:00:00.000Z",
+            session: "s1",
+            tokens_in,
+            tokens_out: 1,
+            cache_read: None,
+            cache_write: None,
+            cost_usd: None,
+            model: "claude-sonnet-5-5",
+            detail: "{}",
+        }
     }
 
     #[test]
@@ -748,11 +973,19 @@ mod tests {
         let (first, again, other) = (
             record_usage_from(&conn, &sourced("m1", 5)),
             record_usage_from(&conn, &sourced("m1", 9)),
-            record_usage_from(&conn, &SourcedUsage { source: "other", ..sourced("m1", 5) }),
+            record_usage_from(
+                &conn,
+                &SourcedUsage {
+                    source: "other",
+                    ..sourced("m1", 5)
+                },
+            ),
         );
         record_usage(&conn, "t", "c", "build", 1, 1, None, None, "{}"); // NULL ref rows never collide
         record_usage(&conn, "t", "c", "build", 1, 1, None, None, "{}");
-        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!((first, again, other, rows), (true, false, true, 4));
     }
@@ -775,7 +1008,7 @@ mod tests {
         let conn = open(&path).unwrap();
         let model = model_of(&conn, r#"{"model":"a/known"}"#);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(results.iter().all(|r| matches!(r, Ok(5))), "{results:?}");
+        assert!(results.iter().all(|r| matches!(r, Ok(6))), "{results:?}");
         assert_eq!(model.as_deref(), Some("a/known"));
     }
 
@@ -804,11 +1037,15 @@ mod tests {
         let (version, model, tasks) = (
             user_version(&conn).unwrap(),
             model_of(&conn, r#"{"model":"a/legacy"}"#),
-            conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0)).unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
         );
-        let (bak1, bak2) = (path.with_extension("db.bak-v1").exists(), path.with_extension("db.bak-v2").exists());
+        let (bak1, bak2) = (
+            path.with_extension("db.bak-v1").exists(),
+            path.with_extension("db.bak-v2").exists(),
+        );
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!((version, tasks, bak1, bak2), (5, 1, true, false));
+        assert_eq!((version, tasks, bak1, bak2), (6, 1, true, false));
         assert_eq!(model.as_deref(), Some("a/legacy"));
     }
 }

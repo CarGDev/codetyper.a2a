@@ -7,7 +7,7 @@
 //! (`claude_backend.rs`) runs headless `claude -p` turns.
 use super::claude_backend::ClaudeBackend;
 use super::dispatcher::log;
-use crate::hub::project::project_root;
+use crate::hub::project::{project_root, same_project};
 use crate::{opencode, paths};
 use serde_json::json;
 use std::collections::{BTreeSet, HashSet};
@@ -74,6 +74,11 @@ pub trait Backend: Send + Sync {
     /// The usable session a task was sent from, when the runtime can tell.
     fn sent_from(&self, _session: &str) -> Option<String> {
         None
+    }
+
+    /// Validate an explicit requester session against the task project when the runtime can inspect it.
+    fn session_matches(&self, _session: &str, _directory: Option<&str>) -> bool {
+        true
     }
 
     /// The newest usable session open in `dir` (a requester that never registered).
@@ -196,6 +201,13 @@ impl Backend for OpencodeBackend {
 
     fn sent_from(&self, session: &str) -> Option<String> {
         opencode::get(session).as_ref().filter(|i| usable(i)).map(|i| i.id.clone())
+    }
+
+    fn session_matches(&self, session: &str, directory: Option<&str>) -> bool {
+        let Some(dir) = directory else { return false };
+        opencode::get(session).is_some_and(|i| {
+            i.directory.is_empty() || i.directory == dir || same_project(dir, &i.directory)
+        })
     }
 
     fn newest_in(&self, dir: &str) -> Option<String> {

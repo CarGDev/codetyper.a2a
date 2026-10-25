@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 pub const HARD_DEFAULT: &str = "github-copilot/claude-sonnet-5.5";
 
-static MODEL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._#/-]+$").unwrap());
+static MODEL_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._#:/-]+$").unwrap());
 static AGENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._-]+$").unwrap());
 static TRAILING_COMMA: LazyLock<Regex> = LazyLock::new(|| Regex::new(r",(\s*[}\]])").unwrap());
 
@@ -188,14 +188,24 @@ pub fn check(model: &str, policy: Option<&Policy>) -> Check {
     if let Some(tier) = policy.allow.get(base) {
         return Check::ok(tier);
     }
+    if LOCAL_PROVIDERS.iter().any(|p| base.starts_with(p)) {
+        return Check::ok("cheap");
+    }
     Check::deny("unknown model (not on the allowlist)")
 }
+
+/// Providers `init` writes for Ollama hosts (`ollama`, `ollama-<host>`): free and local, so the cheap tier.
+const LOCAL_PROVIDERS: [&str; 2] = ["ollama/", "ollama-"];
 
 /// Per-agent models from `agent.<name>.model` in opencode.jsonc; empty on any failure.
 pub fn config_table(file: &Path) -> HashMap<String, String> {
     let mut out = HashMap::new();
     if let Ok(v) = read_jsonc(file) {
-        if let Some(agents) = v.get("agents").or_else(|| v.get("agent")).and_then(|a| a.as_object()) {
+        if let Some(agents) = v
+            .get("agents")
+            .or_else(|| v.get("agent"))
+            .and_then(|a| a.as_object())
+        {
             for (k, v) in agents {
                 if let Some(m) = v.get("model").and_then(|m| m.as_str()) {
                     out.insert(k.clone(), m.to_string());
@@ -292,6 +302,19 @@ mod tests {
         check(model, Some(&load_policy(&repo_policy()).unwrap()))
     }
     fn quiet(_: &str) {}
+
+    #[test]
+    fn ollama_models_are_the_cheap_tier_even_without_an_allowlist_entry() {
+        for model in [
+            "ollama/qwen3.8:27b-mtp-q4_K_M",
+            "ollama-100-99-194-92/gemma4:26b",
+        ] {
+            let c = chk(model);
+            assert!(c.ok, "{model}: {:?}", c.reason);
+            assert_eq!(c.tier.as_deref(), Some("cheap"), "{model}");
+        }
+        assert!(!chk("ollamafake/x").ok, "only the two provider prefixes");
+    }
     fn r(
         agent: &str,
         env: &[(&str, String)],
@@ -369,8 +392,18 @@ mod tests {
         )
         .unwrap();
         assert!(check("p/ok", Some(&policy)).ok);
-        assert!(check("P/OPUS-X", Some(&policy)).reason.unwrap().contains("denied by pattern"));
-        assert!(check("p/held", Some(&policy)).reason.unwrap().contains("blocked"));
+        assert!(
+            check("P/OPUS-X", Some(&policy))
+                .reason
+                .unwrap()
+                .contains("denied by pattern")
+        );
+        assert!(
+            check("p/held", Some(&policy))
+                .reason
+                .unwrap()
+                .contains("blocked")
+        );
     }
 
     #[test]
@@ -406,10 +439,7 @@ mod tests {
             ("OC_MODEL_FORCE", "1".into()),
         ];
         assert_eq!(r("summarizer", &force, None).unwrap().source, "env-force");
-        let bad = [
-            ("OC_MODEL", m("gpt-9-foo")),
-            ("OC_MODEL_FORCE", "1".into()),
-        ];
+        let bad = [("OC_MODEL", m("gpt-9-foo")), ("OC_MODEL_FORCE", "1".into())];
         let d = r("summarizer", &bad, None).unwrap();
         assert_eq!(d.model, m("claude-haiku-5.5"));
         assert!(d.denied.unwrap().contains("gpt-9-foo"));

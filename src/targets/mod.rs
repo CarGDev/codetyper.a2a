@@ -38,13 +38,62 @@ pub struct Target {
 }
 
 pub const TARGETS: [Target; 7] = [
-    Target { id: Id::Claude, name: "Claude Code", scope: Scope::Global, ready: true, bins: &["claude"], dirs: &[".claude"] },
-    Target { id: Id::Opencode, name: "opencode", scope: Scope::Global, ready: true, bins: &["opencode"], dirs: &[".config/opencode"] },
-    Target { id: Id::Codex, name: "Codex CLI", scope: Scope::Global, ready: false, bins: &["codex"], dirs: &[".codex"] },
-    Target { id: Id::Cursor, name: "Cursor", scope: Scope::Project, ready: false, bins: &["cursor"], dirs: &[".cursor"] },
-    Target { id: Id::Gemini, name: "Gemini CLI", scope: Scope::Global, ready: false, bins: &["gemini"], dirs: &[".gemini"] },
-    Target { id: Id::Kiro, name: "Kiro", scope: Scope::Project, ready: false, bins: &["kiro"], dirs: &[".kiro"] },
-    Target { id: Id::Vscode, name: "VS Code (Copilot Chat)", scope: Scope::Project, ready: false, bins: &["code"], dirs: &[".vscode"] },
+    Target {
+        id: Id::Claude,
+        name: "Claude Code",
+        scope: Scope::Global,
+        ready: true,
+        bins: &["claude"],
+        dirs: &[".claude"],
+    },
+    Target {
+        id: Id::Opencode,
+        name: "opencode",
+        scope: Scope::Global,
+        ready: true,
+        bins: &["opencode"],
+        dirs: &[".config/opencode"],
+    },
+    Target {
+        id: Id::Codex,
+        name: "Codex CLI",
+        scope: Scope::Global,
+        ready: false,
+        bins: &["codex"],
+        dirs: &[".codex"],
+    },
+    Target {
+        id: Id::Cursor,
+        name: "Cursor",
+        scope: Scope::Project,
+        ready: false,
+        bins: &["cursor"],
+        dirs: &[".cursor"],
+    },
+    Target {
+        id: Id::Gemini,
+        name: "Gemini CLI",
+        scope: Scope::Global,
+        ready: false,
+        bins: &["gemini"],
+        dirs: &[".gemini"],
+    },
+    Target {
+        id: Id::Kiro,
+        name: "Kiro",
+        scope: Scope::Project,
+        ready: false,
+        bins: &["kiro"],
+        dirs: &[".kiro"],
+    },
+    Target {
+        id: Id::Vscode,
+        name: "VS Code (Copilot Chat)",
+        scope: Scope::Project,
+        ready: false,
+        bins: &["code"],
+        dirs: &[".vscode"],
+    },
 ];
 
 /// What detection looks at; injectable so tests need neither a PATH nor a home dir.
@@ -59,7 +108,9 @@ impl Probe {
         Probe {
             on_path: Box::new(|bin| crate::cli::which(bin).is_some()),
             exists: Box::new(|p| p.exists()),
-            home: std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")),
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".")),
         }
     }
 }
@@ -70,7 +121,11 @@ impl Target {
     }
 
     pub fn detect(&self, probe: &Probe) -> bool {
-        self.bins.iter().any(|b| (probe.on_path)(b)) || self.dirs.iter().any(|d| (probe.exists)(&probe.home.join(d)))
+        self.bins.iter().any(|b| (probe.on_path)(b))
+            || self
+                .dirs
+                .iter()
+                .any(|d| (probe.exists)(&probe.home.join(d)))
     }
 
     /// The picker row text: `Claude Code (detected) — global only`.
@@ -80,14 +135,22 @@ impl Target {
             (true, true) => "detected",
             (true, false) => "not found",
         };
-        let scope = if self.ready && self.scope == Scope::Global { " — global only" } else { "" };
+        let scope = if self.ready && self.scope == Scope::Global {
+            " — global only"
+        } else {
+            ""
+        };
         format!("{} ({state}){scope}", self.name)
     }
 }
 
 /// Ids of the installable targets found on this machine.
 pub fn detected(probe: &Probe) -> Vec<Id> {
-    TARGETS.iter().filter(|t| t.installable() && t.detect(probe)).map(|t| t.id).collect()
+    TARGETS
+        .iter()
+        .filter(|t| t.installable() && t.detect(probe))
+        .map(|t| t.id)
+        .collect()
 }
 
 /// The `init` flags that choose targets.
@@ -104,7 +167,14 @@ pub struct Flags {
 impl Flags {
     pub fn from_args(args: &[String], tty: bool) -> Flags {
         let has = |f: &str| args.iter().any(|a| a == f);
-        Flags { all: has("--all"), claude: has("--claude"), opencode: has("--opencode"), yes: has("--yes"), md_only: has("--md-only"), tty }
+        Flags {
+            all: has("--all"),
+            claude: has("--claude"),
+            opencode: has("--opencode"),
+            yes: has("--yes"),
+            md_only: has("--md-only"),
+            tty,
+        }
     }
 }
 
@@ -119,9 +189,19 @@ pub enum Plan {
 /// without a terminal or with `--yes` the detected ones are used (opencode when none are, as before).
 pub fn plan(flags: &Flags, detected: &[Id]) -> Plan {
     if flags.all {
-        return Plan::Run(TARGETS.iter().filter(|t| t.installable()).map(|t| t.id).collect());
+        return Plan::Run(
+            TARGETS
+                .iter()
+                .filter(|t| t.installable())
+                .map(|t| t.id)
+                .collect(),
+        );
     }
-    let chosen: Vec<Id> = [(flags.opencode, Id::Opencode), (flags.claude, Id::Claude)].into_iter().filter(|(on, _)| *on).map(|(_, id)| id).collect();
+    let chosen: Vec<Id> = [(flags.opencode, Id::Opencode), (flags.claude, Id::Claude)]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, id)| id)
+        .collect();
     if !chosen.is_empty() {
         return Plan::Run(chosen);
     }
@@ -131,7 +211,11 @@ pub fn plan(flags: &Flags, detected: &[Id]) -> Plan {
     if !flags.yes && flags.tty {
         return Plan::Ask;
     }
-    Plan::Run(if detected.is_empty() { vec![Id::Opencode] } else { detected.to_vec() })
+    Plan::Run(if detected.is_empty() {
+        vec![Id::Opencode]
+    } else {
+        detected.to_vec()
+    })
 }
 
 #[cfg(test)]
@@ -154,7 +238,10 @@ mod tests {
     fn detection_uses_path_or_config_dir() {
         assert_eq!(detected(&probe(&["claude"], &[])), [Id::Claude]);
         assert_eq!(detected(&probe(&[], &[".config/opencode"])), [Id::Opencode]);
-        assert_eq!(detected(&probe(&["claude", "opencode"], &[])), [Id::Claude, Id::Opencode]);
+        assert_eq!(
+            detected(&probe(&["claude", "opencode"], &[])),
+            [Id::Claude, Id::Opencode]
+        );
         assert!(detected(&probe(&[], &[])).is_empty());
     }
 
@@ -162,7 +249,12 @@ mod tests {
     fn coming_soon_targets_are_never_detected_as_installable() {
         let p = probe(&["codex", "cursor", "gemini", "kiro", "code"], &[]);
         assert!(detected(&p).is_empty());
-        assert!(TARGETS.iter().filter(|t| !t.ready).all(|t| !t.installable()));
+        assert!(
+            TARGETS
+                .iter()
+                .filter(|t| !t.ready)
+                .all(|t| !t.installable())
+        );
         assert_eq!(TARGETS.iter().filter(|t| t.installable()).count(), 2);
     }
 
@@ -176,23 +268,51 @@ mod tests {
 
     #[test]
     fn flags_choose_targets_without_asking() {
-        assert_eq!(plan(&flags(&["--claude"], true), &[]), Plan::Run(vec![Id::Claude]));
-        assert_eq!(plan(&flags(&["--opencode"], true), &[Id::Claude]), Plan::Run(vec![Id::Opencode]));
-        assert_eq!(plan(&flags(&["--claude", "--opencode"], true), &[]), Plan::Run(vec![Id::Opencode, Id::Claude]));
-        assert_eq!(plan(&flags(&["--all"], true), &[]), Plan::Run(vec![Id::Claude, Id::Opencode]));
+        assert_eq!(
+            plan(&flags(&["--claude"], true), &[]),
+            Plan::Run(vec![Id::Claude])
+        );
+        assert_eq!(
+            plan(&flags(&["--opencode"], true), &[Id::Claude]),
+            Plan::Run(vec![Id::Opencode])
+        );
+        assert_eq!(
+            plan(&flags(&["--claude", "--opencode"], true), &[]),
+            Plan::Run(vec![Id::Opencode, Id::Claude])
+        );
+        assert_eq!(
+            plan(&flags(&["--all"], true), &[]),
+            Plan::Run(vec![Id::Claude, Id::Opencode])
+        );
     }
 
     #[test]
     fn update_keeps_refreshing_opencode_only() {
-        assert_eq!(plan(&flags(&["--md-only"], true), &[Id::Claude, Id::Opencode]), Plan::Run(vec![Id::Opencode]));
-        assert_eq!(plan(&flags(&["--md-only", "--claude"], true), &[]), Plan::Run(vec![Id::Claude]));
+        assert_eq!(
+            plan(&flags(&["--md-only"], true), &[Id::Claude, Id::Opencode]),
+            Plan::Run(vec![Id::Opencode])
+        );
+        assert_eq!(
+            plan(&flags(&["--md-only", "--claude"], true), &[]),
+            Plan::Run(vec![Id::Claude])
+        );
     }
 
     #[test]
     fn picker_only_on_a_terminal_without_yes() {
         assert_eq!(plan(&flags(&[], true), &[Id::Claude]), Plan::Ask);
-        assert_eq!(plan(&flags(&["--yes"], true), &[Id::Claude]), Plan::Run(vec![Id::Claude]));
-        assert_eq!(plan(&flags(&[], false), &[Id::Claude, Id::Opencode]), Plan::Run(vec![Id::Claude, Id::Opencode]));
-        assert_eq!(plan(&flags(&[], false), &[]), Plan::Run(vec![Id::Opencode]), "nothing detected keeps the old default");
+        assert_eq!(
+            plan(&flags(&["--yes"], true), &[Id::Claude]),
+            Plan::Run(vec![Id::Claude])
+        );
+        assert_eq!(
+            plan(&flags(&[], false), &[Id::Claude, Id::Opencode]),
+            Plan::Run(vec![Id::Claude, Id::Opencode])
+        );
+        assert_eq!(
+            plan(&flags(&[], false), &[]),
+            Plan::Run(vec![Id::Opencode]),
+            "nothing detected keeps the old default"
+        );
     }
 }

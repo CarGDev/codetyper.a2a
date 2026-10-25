@@ -11,7 +11,9 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+    },
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -22,10 +24,34 @@ use std::time::Duration;
 // ---- recommendations ------------------------------------------------------------------------
 
 /// Preference lists, best first; the first one opencode has wins. Model ids, without the provider.
-const CHEAP: &[&str] = &["claude-haiku-5.5", "gpt-6-luna", "gpt-5.6-luna", "claude-haiku-4.5", "gpt-5.4-nano", "mai-code-1.1-flash"];
-const BALANCED: &[&str] = &["claude-sonnet-5.5", "claude-sonnet-5", "gpt-5.6-terra", "claude-sonnet-4.6"];
-const DEEP: &[&str] = &["claude-opus-5.5", "gpt-6.1-sol", "claude-opus-5", "claude-sonnet-5.5", "claude-sonnet-5"];
-const OTHER_FAMILY: &[&str] = &["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-terra", "gpt-5.3-codex", "claude-sonnet-5.5"];
+const CHEAP: &[&str] = &[
+    "claude-haiku-5.5",
+    "gpt-6-luna",
+    "gpt-5.6-luna",
+    "claude-haiku-4.5",
+    "gpt-5.4-nano",
+    "mai-code-1.1-flash",
+];
+const BALANCED: &[&str] = &[
+    "claude-sonnet-5.5",
+    "claude-sonnet-5",
+    "gpt-5.6-terra",
+    "claude-sonnet-4.6",
+];
+const DEEP: &[&str] = &[
+    "claude-opus-5.5",
+    "gpt-6.1-sol",
+    "claude-opus-5",
+    "claude-sonnet-5.5",
+    "claude-sonnet-5",
+];
+const OTHER_FAMILY: &[&str] = &[
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.3-codex",
+    "claude-sonnet-5.5",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tier {
@@ -47,19 +73,33 @@ impl Tier {
 
     pub fn why(self) -> &'static str {
         match self {
-            Tier::Cheap => "light work (routing, running commands, summaries, lookups): fast and cheap",
+            Tier::Cheap => {
+                "light work (routing, running commands, summaries, lookups): fast and cheap"
+            }
             Tier::Balanced => "everyday coding and agentic work: capable without the top price",
             Tier::Deep => "design and long-horizon reasoning: worth the strongest model",
-            Tier::OtherFamily => "reviewing: a different model family than the one that wrote the code",
+            Tier::OtherFamily => {
+                "reviewing: a different model family than the one that wrote the code"
+            }
         }
     }
 }
 
 pub fn tier_for(agent: &str) -> Option<Tier> {
     Some(match agent {
-        "brain" | "test-runner" | "summarizer" | "doc-lookup" | "git-historian" | "pr-commenter" | "mentor" => Tier::Cheap,
-        "orchestrator" | "plan" | "build" | "code-debugger" | "owasp-guardian" | "security-scanner" | "test-case-generator"
-        | "react-frontend-expert" | "typescript-mcp-expert" | "api-design-architect" | "software-architecture-expert"
+        "brain" | "test-runner" | "summarizer" | "doc-lookup" | "git-historian"
+        | "pr-commenter" | "mentor" => Tier::Cheap,
+        "orchestrator"
+        | "plan"
+        | "build"
+        | "code-debugger"
+        | "owasp-guardian"
+        | "security-scanner"
+        | "test-case-generator"
+        | "react-frontend-expert"
+        | "typescript-mcp-expert"
+        | "api-design-architect"
+        | "software-architecture-expert"
         | "playwright-tester" => Tier::Balanced,
         "architect" => Tier::Deep,
         "code-reviewer" | "pr-reviewer" => Tier::OtherFamily,
@@ -77,7 +117,11 @@ fn model_id(full: &str) -> &str {
 pub fn recommend(tier: Tier, available: &[String]) -> Option<String> {
     for id in tier.list() {
         let hits: Vec<&String> = available.iter().filter(|m| model_id(m) == *id).collect();
-        if let Some(m) = hits.iter().find(|m| m.starts_with("github-copilot/")).or_else(|| hits.first()) {
+        if let Some(m) = hits
+            .iter()
+            .find(|m| m.starts_with("github-copilot/"))
+            .or_else(|| hits.first())
+        {
             return Some((*m).clone());
         }
     }
@@ -93,7 +137,8 @@ pub fn price_hint(model: &str) -> &'static str {
         "gemini-3.8-flash" => "$0.75 / $3.75",
         "claude-haiku-4.5" => "$1 / $5",
         "gpt-5.3-codex" => "$1.75 / $14",
-        "claude-sonnet-5" | "claude-sonnet-5.5" | "gpt-6-sol" | "gpt-6.1-sol" | "gemini-4-argon" => "$2 / $10",
+        "claude-sonnet-5" | "claude-sonnet-5.5" | "gpt-6-sol" | "gpt-6.1-sol"
+        | "gemini-4-argon" => "$2 / $10",
         "gpt-5.6-terra" => "$2 / $12",
         "grok-4.5" | "grok-4.6" | "grok-4.7" => "$2 / $6",
         "claude-sonnet-4.6" | "kimi-k3" => "$3 / $15",
@@ -117,12 +162,19 @@ pub fn price(model: &str) -> Option<(f64, f64)> {
 pub fn load_config(root: &Path) -> Result<(Value, bool), String> {
     let path = root.join("opencode.jsonc");
     if !path.exists() {
-        return Ok((json!({ "$schema": "https://opencode.ai/config.json" }), true));
+        return Ok((
+            json!({ "$schema": "https://opencode.ai/config.json" }),
+            true,
+        ));
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     match serde_json::from_str(&text) {
         Ok(v) => Ok((v, true)),
-        Err(_) => Ok((crate::model_guard::read_jsonc(&path).unwrap_or(Value::Null), false)),
+        Err(_) => Ok((
+            crate::model_guard::read_jsonc(&path).unwrap_or(Value::Null),
+            false,
+        )),
     }
 }
 
@@ -143,14 +195,20 @@ pub fn current_models(cfg: &Value) -> BTreeMap<String, String> {
 
 /// Set (`Some`) or remove (`None`) each agent's model, keeping everything else in its entry.
 pub fn apply_models(cfg: &mut Value, changes: &BTreeMap<String, Option<String>>) {
-    let key = if cfg.get("agents").is_some_and(Value::is_object) || !cfg.get("agent").is_some_and(Value::is_object) {
+    let key = if cfg.get("agents").is_some_and(Value::is_object)
+        || !cfg.get("agent").is_some_and(Value::is_object)
+    {
         "agents"
     } else {
         "agent"
     };
-    let Some(obj) = cfg.as_object_mut() else { return };
+    let Some(obj) = cfg.as_object_mut() else {
+        return;
+    };
     let table = obj.entry(key).or_insert_with(|| json!({}));
-    let Some(table) = table.as_object_mut() else { return };
+    let Some(table) = table.as_object_mut() else {
+        return;
+    };
     for (name, model) in changes {
         match model {
             Some(m) => {
@@ -209,10 +267,12 @@ fn save_config(root: &Path, cfg: &Value) -> Result<PathBuf, String> {
     let path = root.join("opencode.jsonc");
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     if path.exists() {
-        std::fs::copy(&path, root.join("opencode.jsonc.bak-a2a-models")).map_err(|e| format!("cannot back up {}: {e}", path.display()))?;
+        std::fs::copy(&path, root.join("opencode.jsonc.bak-a2a-models"))
+            .map_err(|e| format!("cannot back up {}: {e}", path.display()))?;
     }
     let text = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(&path, text + "\n").map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    std::fs::write(&path, text + "\n")
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -234,7 +294,11 @@ pub struct AgentRow {
 /// file first, so `sync_agent_files` keeps the file in step with the config override.
 pub type AgentEntry = (String, String, Option<String>);
 
-pub fn build_rows(agents: Vec<AgentEntry>, current: &BTreeMap<String, String>, available: &[String]) -> Vec<AgentRow> {
+pub fn build_rows(
+    agents: Vec<AgentEntry>,
+    current: &BTreeMap<String, String>,
+    available: &[String],
+) -> Vec<AgentRow> {
     let mut rows: Vec<AgentRow> = agents
         .into_iter()
         .map(|(agent, description, resolved)| {
@@ -244,7 +308,9 @@ pub fn build_rows(agents: Vec<AgentEntry>, current: &BTreeMap<String, String>, a
             AgentRow {
                 rec: tier.and_then(|t| recommend(t, available)),
                 tier,
-                unavailable: cur.as_deref().is_some_and(|m| !available.iter().any(|a| *a == base(m))),
+                unavailable: cur
+                    .as_deref()
+                    .is_some_and(|m| !available.iter().any(|a| *a == base(m))),
                 current: cur.clone(),
                 choice: cur,
                 description,
@@ -275,14 +341,32 @@ const DEFAULT_LABEL: &str = "(no override: the agent file's or opencode's defaul
 
 impl App {
     pub fn new(rows: Vec<AgentRow>, models: Vec<String>) -> Self {
-        App { rows, models, cursor: 0, picker: None, save: false, done: false, message: String::new() }
+        App {
+            rows,
+            models,
+            cursor: 0,
+            picker: None,
+            save: false,
+            done: false,
+            message: String::new(),
+        }
     }
 
     /// Models matching the picker filter; `None` is the "no override" entry.
     fn picker_items(&self) -> Vec<Option<String>> {
-        let f = self.picker.as_ref().map(|p| p.filter.to_lowercase()).unwrap_or_default();
+        let f = self
+            .picker
+            .as_ref()
+            .map(|p| p.filter.to_lowercase())
+            .unwrap_or_default();
         let mut v = vec![None];
-        v.extend(self.models.iter().filter(|m| f.is_empty() || m.to_lowercase().contains(&f)).cloned().map(Some));
+        v.extend(
+            self.models
+                .iter()
+                .filter(|m| f.is_empty() || m.to_lowercase().contains(&f))
+                .cloned()
+                .map(Some),
+        );
         v
     }
 
@@ -312,7 +396,10 @@ impl App {
             KeyCode::End => self.cursor = last,
             KeyCode::Enter | KeyCode::Right | KeyCode::Char(' ') => {
                 if !self.rows.is_empty() {
-                    self.picker = Some(Picker { filter: String::new(), sel: 0 });
+                    self.picker = Some(Picker {
+                        filter: String::new(),
+                        sel: 0,
+                    });
                 }
             }
             KeyCode::Char('r') => {
@@ -345,7 +432,9 @@ impl App {
 
     fn picker_key(&mut self, code: KeyCode) {
         let n = self.picker_items().len();
-        let Some(p) = self.picker.as_mut() else { return };
+        let Some(p) = self.picker.as_mut() else {
+            return;
+        };
         match code {
             KeyCode::Esc => self.picker = None,
             KeyCode::Up => p.sel = p.sel.saturating_sub(1),
@@ -378,20 +467,39 @@ impl App {
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
-    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let [head, body, foot] = Layout::vertical([Constraint::Length(2), Constraint::Min(5), Constraint::Length(4)]).areas(f.area());
+    let [head, body, foot] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(5),
+        Constraint::Length(4),
+    ])
+    .areas(f.area());
     f.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::styled("Agent models", Style::default().add_modifier(Modifier::BOLD))),
-            Line::from(format!("{} agents, {} models available, {} unsaved change(s)", app.rows.len(), app.models.len(), app.changed())),
+            Line::from(Span::styled(
+                "Agent models",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!(
+                "{} agents, {} models available, {} unsaved change(s)",
+                app.rows.len(),
+                app.models.len(),
+                app.changed()
+            )),
         ]),
         head,
     );
 
-    let header = Row::new(["", "Agent", "Model", "Recommended", "$/1M in / out"]).style(Style::default().add_modifier(Modifier::BOLD));
+    let header = Row::new(["", "Agent", "Model", "Recommended", "$/1M in / out"])
+        .style(Style::default().add_modifier(Modifier::BOLD));
     let rows: Vec<Row> = app
         .rows
         .iter()
@@ -403,11 +511,19 @@ pub fn draw(f: &mut Frame, app: &App) {
                 (Some(m), false) => m.clone(),
                 (None, _) => "(default)".into(),
             };
-            let style = if changed { Style::default().fg(Color::Yellow) } else { Style::default() };
+            let style = if changed {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            };
             Row::new([
                 Cell::from(if changed { "*" } else { " " }),
                 Cell::from(r.agent.clone()),
-                Cell::from(model).style(if missing { Style::default().fg(Color::Red) } else { Style::default() }),
+                Cell::from(model).style(if missing {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default()
+                }),
                 Cell::from(r.rec.clone().unwrap_or_default()),
                 Cell::from(r.choice.as_deref().map(price_hint).unwrap_or("")),
             ])
@@ -416,7 +532,13 @@ pub fn draw(f: &mut Frame, app: &App) {
         .collect();
     let table = Table::new(
         rows,
-        [Constraint::Length(2), Constraint::Length(30), Constraint::Min(30), Constraint::Min(28), Constraint::Length(14)],
+        [
+            Constraint::Length(2),
+            Constraint::Length(30),
+            Constraint::Min(30),
+            Constraint::Min(28),
+            Constraint::Length(14),
+        ],
     )
     .header(header)
     .block(Block::default().borders(Borders::ALL))
@@ -430,14 +552,22 @@ pub fn draw(f: &mut Frame, app: &App) {
         .get(app.cursor)
         .map(|r| match r.tier {
             Some(t) => format!("{}: {}", r.agent, t.why()),
-            None => format!("{}: no recommendation (your own agent); pick any model or leave the default", r.agent),
+            None => format!(
+                "{}: no recommendation (your own agent); pick any model or leave the default",
+                r.agent
+            ),
         })
         .unwrap_or_default();
     f.render_widget(
         Paragraph::new(vec![
             Line::from(hint),
-            Line::from(Span::styled(app.message.clone(), Style::default().fg(Color::Green))),
-            Line::from("up/down move   enter pick   r recommended   c clear   u undo   s save   q quit"),
+            Line::from(Span::styled(
+                app.message.clone(),
+                Style::default().fg(Color::Green),
+            )),
+            Line::from(
+                "up/down move   enter pick   r recommended   c clear   u undo   s save   q quit",
+            ),
         ])
         .block(Block::default().borders(Borders::TOP)),
         foot,
@@ -446,23 +576,38 @@ pub fn draw(f: &mut Frame, app: &App) {
     if let Some(p) = &app.picker {
         let area = centered(f.area(), 70, f.area().height.saturating_sub(4).min(24));
         f.render_widget(Clear, area);
-        let agent = app.rows.get(app.cursor).map(|r| r.agent.as_str()).unwrap_or("");
+        let agent = app
+            .rows
+            .get(app.cursor)
+            .map(|r| r.agent.as_str())
+            .unwrap_or("");
         let items = app.picker_items();
         let list: Vec<ListItem> = items
             .iter()
             .map(|m| match m {
                 None => ListItem::new(DEFAULT_LABEL),
                 Some(m) => {
-                    let star = if app.rows.get(app.cursor).and_then(|r| r.rec.as_deref()) == Some(m.as_str()) { " (recommended)" } else { "" };
+                    let star = if app.rows.get(app.cursor).and_then(|r| r.rec.as_deref())
+                        == Some(m.as_str())
+                    {
+                        " (recommended)"
+                    } else {
+                        ""
+                    };
                     ListItem::new(format!("{m}  {}{star}", price_hint(m)))
                 }
             })
             .collect();
         let list = List::new(list)
-            .block(Block::default().borders(Borders::ALL).title(format!(" model for {agent}   filter: {}_ ", p.filter)))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" model for {agent}   filter: {}_ ", p.filter)),
+            )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("> ");
-        let mut ls = ListState::default().with_selected(Some(p.sel.min(items.len().saturating_sub(1))));
+        let mut ls =
+            ListState::default().with_selected(Some(p.sel.min(items.len().saturating_sub(1))));
         f.render_stateful_widget(list, area, &mut ls);
     }
 }
@@ -491,8 +636,11 @@ fn run_tui(app: &mut App) -> std::io::Result<()> {
 /// Agents to configure: everything opencode lists (not hidden), else the installed templates.
 fn agent_list(root: &Path) -> Vec<AgentEntry> {
     if let Ok(list) = opencode::agents(None) {
-        let v: Vec<AgentEntry> =
-            list.into_iter().filter(|a| !a.hidden).map(|a| (a.id, a.description, a.model.as_ref().map(model_string))).collect();
+        let v: Vec<AgentEntry> = list
+            .into_iter()
+            .filter(|a| !a.hidden)
+            .map(|a| (a.id, a.description, a.model.as_ref().map(model_string)))
+            .collect();
         if !v.is_empty() {
             return v;
         }
@@ -510,7 +658,11 @@ fn agent_list(root: &Path) -> Vec<AgentEntry> {
 
 /// `{providerID, id, variant?}` -> `provider/id[#variant]`.
 fn model_string(m: &Value) -> String {
-    let base = format!("{}/{}", m["providerID"].as_str().unwrap_or(""), m["id"].as_str().unwrap_or(""));
+    let base = format!(
+        "{}/{}",
+        m["providerID"].as_str().unwrap_or(""),
+        m["id"].as_str().unwrap_or("")
+    );
     match m["variant"].as_str().filter(|v| !v.is_empty()) {
         Some(v) => format!("{base}#{v}"),
         None => base,
@@ -521,7 +673,10 @@ fn model_string(m: &Value) -> String {
 fn frontmatter_model(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let fm = text.splitn(3, "---\n").nth(1)?;
-    fm.lines().find_map(|l| l.strip_prefix("model:")).map(|m| m.trim().trim_matches('"').to_string()).filter(|m| !m.is_empty())
+    fm.lines()
+        .find_map(|l| l.strip_prefix("model:"))
+        .map(|m| m.trim().trim_matches('"').to_string())
+        .filter(|m| !m.is_empty())
 }
 
 /// After `init`: the installed agent files that name a model this opencode does not have. Best
@@ -530,9 +685,16 @@ pub fn availability_note(root: &Path) -> Option<String> {
     let available = opencode::models().ok()?;
     let mut missing = Vec::new();
     for e in std::fs::read_dir(root.join("agents")).ok()?.flatten() {
-        let name = e.file_name().to_string_lossy().strip_suffix(".md")?.to_string();
+        let name = e
+            .file_name()
+            .to_string_lossy()
+            .strip_suffix(".md")?
+            .to_string();
         if let Some(m) = frontmatter_model(&e.path()) {
-            if !available.iter().any(|a| *a == m.split('#').next().unwrap_or(&m)) {
+            if !available
+                .iter()
+                .any(|a| *a == m.split('#').next().unwrap_or(&m))
+            {
                 missing.push(format!("{name} ({m})"));
             }
         }
@@ -549,19 +711,31 @@ pub fn availability_note(root: &Path) -> Option<String> {
 }
 
 fn print_table(rows: &[AgentRow]) {
-    println!("{:<30} {:<52} {:<40} {}", "agent", "model", "recommended", "$/1M in / out");
+    println!(
+        "{:<30} {:<52} {:<40} {}",
+        "agent", "model", "recommended", "$/1M in / out"
+    );
     for r in rows {
         let mut m = r.choice.clone().unwrap_or_else(|| "(default)".into());
         if r.unavailable && r.choice == r.current {
             m.push_str(" (not available here)");
         }
-        println!("{:<30} {:<52} {:<40} {}", r.agent, m, r.rec.clone().unwrap_or_default(), r.choice.as_deref().map(price_hint).unwrap_or(""));
+        println!(
+            "{:<30} {:<52} {:<40} {}",
+            r.agent,
+            m,
+            r.rec.clone().unwrap_or_default(),
+            r.choice.as_deref().map(price_hint).unwrap_or("")
+        );
     }
 }
 
 fn commit(root: &Path, mut cfg: Value, strict: bool, rows: &[AgentRow]) -> Result<(), String> {
-    let changes: BTreeMap<String, Option<String>> =
-        rows.iter().filter(|r| r.choice != r.current).map(|r| (r.agent.clone(), r.choice.clone())).collect();
+    let changes: BTreeMap<String, Option<String>> = rows
+        .iter()
+        .filter(|r| r.choice != r.current)
+        .map(|r| (r.agent.clone(), r.choice.clone()))
+        .collect();
     if changes.is_empty() {
         println!("models: nothing changed");
         return Ok(());
@@ -571,23 +745,37 @@ fn commit(root: &Path, mut cfg: Value, strict: bool, rows: &[AgentRow]) -> Resul
         // comments or trailing commas would be lost: show what to add instead
         let mut only = Value::Object(Default::default());
         apply_models(&mut only, &changes);
-        println!("models: opencode.jsonc has comments, so it was left untouched. Add this to it:\n{}", serde_json::to_string_pretty(&only).unwrap_or_default());
+        println!(
+            "models: opencode.jsonc has comments, so it was left untouched. Add this to it:\n{}",
+            serde_json::to_string_pretty(&only).unwrap_or_default()
+        );
         return Ok(());
     }
     let path = save_config(root, &cfg)?;
     let synced = sync_agent_files(root, &current_models(&cfg));
-    println!("models: {} agent model(s) saved in {} (backup: opencode.jsonc.bak-a2a-models)", changes.len(), path.display());
+    println!(
+        "models: {} agent model(s) saved in {} (backup: opencode.jsonc.bak-a2a-models)",
+        changes.len(),
+        path.display()
+    );
     for note in policy_violations(root, &changes) {
         println!("models: note: {note}");
     }
-    println!("models: {synced} agent file(s) updated too (opencode reads the model from the agent file first)");
-    println!("models: restart opencode (or `opencode reload`); new agent sessions use these models");
+    println!(
+        "models: {synced} agent file(s) updated too (opencode reads the model from the agent file first)"
+    );
+    println!(
+        "models: restart opencode (or `opencode reload`); new agent sessions use these models"
+    );
     Ok(())
 }
 
 /// Chosen models that the installed `a2a/model-policy.json` would flag in `check-models`.
 fn policy_violations(root: &Path, changes: &BTreeMap<String, Option<String>>) -> Vec<String> {
-    let Ok(policy) = crate::model_guard::load_policy(&root.join("a2a").join("model-policy.json")) else { return vec![] };
+    let Ok(policy) = crate::model_guard::load_policy(&root.join("a2a").join("model-policy.json"))
+    else {
+        return vec![];
+    };
     changes
         .iter()
         .filter_map(|(agent, m)| {
@@ -599,10 +787,17 @@ fn policy_violations(root: &Path, changes: &BTreeMap<String, Option<String>>) ->
 }
 
 /// Shared by `codetypera2a models` and `init`. `interactive`: show the UI when attached to a terminal.
-pub fn configure(root: &Path, recommended: bool, show: bool, interactive: bool) -> Result<(), String> {
+pub fn configure(
+    root: &Path,
+    recommended: bool,
+    show: bool,
+    interactive: bool,
+) -> Result<(), String> {
     let on_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     if !recommended && !show && !(interactive && on_terminal) {
-        println!("models: not a terminal; run `codetypera2a models` to choose models, or `codetypera2a models --recommended`");
+        println!(
+            "models: not a terminal; run `codetypera2a models` to choose models, or `codetypera2a models --recommended`"
+        );
         return Ok(());
     }
     let available = opencode::models()?;
@@ -634,7 +829,10 @@ pub fn configure(root: &Path, recommended: bool, show: bool, interactive: bool) 
 
 fn config_root(args: &[String]) -> PathBuf {
     match args.iter().position(|a| a == "--dir") {
-        Some(i) => args.get(i + 1).map(PathBuf::from).unwrap_or_else(paths::config_dir),
+        Some(i) => args
+            .get(i + 1)
+            .map(PathBuf::from)
+            .unwrap_or_else(paths::config_dir),
         None => paths::config_dir(),
     }
 }
@@ -658,7 +856,10 @@ mod tests {
     fn frontmatter_model_is_replaced_in_place() {
         let text = "---\ndescription: x\nmodel: github-copilot/claude-sonnet-5.5\nmode: subagent\n---\nbody model: keep\n";
         let out = set_frontmatter_model(text, "openai/gpt-5.6-luna#max").unwrap();
-        assert_eq!(out, "---\ndescription: x\nmodel: openai/gpt-5.6-luna\nmode: subagent\n---\nbody model: keep\n");
+        assert_eq!(
+            out,
+            "---\ndescription: x\nmodel: openai/gpt-5.6-luna\nmode: subagent\n---\nbody model: keep\n"
+        );
         assert_eq!(set_frontmatter_model(&out, "openai/gpt-5.6-luna"), None);
         assert_eq!(set_frontmatter_model("no frontmatter", "a/b"), None);
     }
@@ -675,31 +876,77 @@ mod tests {
 
     #[test]
     fn recommends_by_role_and_falls_back() {
-        let all = avail(&["github-copilot/claude-haiku-5.5", "github-copilot/claude-sonnet-5.5", "github-copilot/claude-opus-5.5", "github-copilot/gpt-6.1-sol"]);
-        assert_eq!(recommend(Tier::Cheap, &all).as_deref(), Some("github-copilot/claude-haiku-5.5"));
-        assert_eq!(recommend(Tier::Balanced, &all).as_deref(), Some("github-copilot/claude-sonnet-5.5"));
-        assert_eq!(recommend(Tier::Deep, &all).as_deref(), Some("github-copilot/claude-opus-5.5"));
-        assert_eq!(recommend(Tier::OtherFamily, &all).as_deref(), Some("github-copilot/gpt-6.1-sol"));
+        let all = avail(&[
+            "github-copilot/claude-haiku-5.5",
+            "github-copilot/claude-sonnet-5.5",
+            "github-copilot/claude-opus-5.5",
+            "github-copilot/gpt-6.1-sol",
+        ]);
+        assert_eq!(
+            recommend(Tier::Cheap, &all).as_deref(),
+            Some("github-copilot/claude-haiku-5.5")
+        );
+        assert_eq!(
+            recommend(Tier::Balanced, &all).as_deref(),
+            Some("github-copilot/claude-sonnet-5.5")
+        );
+        assert_eq!(
+            recommend(Tier::Deep, &all).as_deref(),
+            Some("github-copilot/claude-opus-5.5")
+        );
+        assert_eq!(
+            recommend(Tier::OtherFamily, &all).as_deref(),
+            Some("github-copilot/gpt-6.1-sol")
+        );
         // no OpenAI model: reviewers fall back to the balanced Claude; nothing suitable: no recommendation
         let claude = avail(&["github-copilot/claude-sonnet-5.5"]);
-        assert_eq!(recommend(Tier::OtherFamily, &claude).as_deref(), Some("github-copilot/claude-sonnet-5.5"));
+        assert_eq!(
+            recommend(Tier::OtherFamily, &claude).as_deref(),
+            Some("github-copilot/claude-sonnet-5.5")
+        );
         assert_eq!(recommend(Tier::Deep, &avail(&["x/unknown"])), None);
         // a direct provider works too, and GitHub Copilot is preferred when both exist
-        let both = avail(&["anthropic/claude-sonnet-5.5", "github-copilot/claude-sonnet-5.5"]);
-        assert_eq!(recommend(Tier::Balanced, &both).as_deref(), Some("github-copilot/claude-sonnet-5.5"));
-        assert_eq!(recommend(Tier::Balanced, &avail(&["anthropic/claude-sonnet-5.5"])).as_deref(), Some("anthropic/claude-sonnet-5.5"));
+        let both = avail(&[
+            "anthropic/claude-sonnet-5.5",
+            "github-copilot/claude-sonnet-5.5",
+        ]);
+        assert_eq!(
+            recommend(Tier::Balanced, &both).as_deref(),
+            Some("github-copilot/claude-sonnet-5.5")
+        );
+        assert_eq!(
+            recommend(Tier::Balanced, &avail(&["anthropic/claude-sonnet-5.5"])).as_deref(),
+            Some("anthropic/claude-sonnet-5.5")
+        );
     }
 
     #[test]
     fn policy_violations_are_reported_not_enforced() {
         let dir = std::env::temp_dir().join(format!("a2a-pol-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("a2a")).unwrap();
-        std::fs::write(dir.join("a2a/model-policy.json"), r#"{"default":"p/ok","allow":{"p/ok":"cheap"},"denyPatterns":["opus"]}"#).unwrap();
-        let ch = BTreeMap::from([("architect".to_string(), Some("p/claude-opus-5.5".to_string())), ("brain".to_string(), Some("p/ok".to_string())), ("x".to_string(), None)]);
+        std::fs::write(
+            dir.join("a2a/model-policy.json"),
+            r#"{"default":"p/ok","allow":{"p/ok":"cheap"},"denyPatterns":["opus"]}"#,
+        )
+        .unwrap();
+        let ch = BTreeMap::from([
+            (
+                "architect".to_string(),
+                Some("p/claude-opus-5.5".to_string()),
+            ),
+            ("brain".to_string(), Some("p/ok".to_string())),
+            ("x".to_string(), None),
+        ]);
         let v = policy_violations(&dir, &ch);
         assert_eq!(v.len(), 1, "{v:?}");
-        assert!(v[0].starts_with("architect:") && v[0].contains("opus"), "{v:?}");
-        assert!(policy_violations(&dir.join("nowhere"), &ch).is_empty(), "no policy file, no notes");
+        assert!(
+            v[0].starts_with("architect:") && v[0].contains("opus"),
+            "{v:?}"
+        );
+        assert!(
+            policy_violations(&dir.join("nowhere"), &ch).is_empty(),
+            "no policy file, no notes"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -717,29 +964,58 @@ mod tests {
         let mut cfg = json!({"model":"x/y","agents":{"mentor":{"model":"a/b","temperature":0.2},"plan":{"description":"d"}}});
         let mut ch = BTreeMap::new();
         ch.insert("mentor".to_string(), None); // remove model, keep temperature
-        ch.insert("plan".to_string(), Some("github-copilot/claude-sonnet-5.5".to_string()));
-        ch.insert("brain".to_string(), Some("github-copilot/claude-haiku-5.5#high".to_string()));
+        ch.insert(
+            "plan".to_string(),
+            Some("github-copilot/claude-sonnet-5.5".to_string()),
+        );
+        ch.insert(
+            "brain".to_string(),
+            Some("github-copilot/claude-haiku-5.5#high".to_string()),
+        );
         apply_models(&mut cfg, &ch);
         assert_eq!(cfg["model"], "x/y");
         assert_eq!(cfg["agents"]["mentor"], json!({"temperature":0.2}));
-        assert_eq!(cfg["agents"]["plan"], json!({"description":"d","model":"github-copilot/claude-sonnet-5.5"}));
-        assert_eq!(cfg["agents"]["brain"]["model"], "github-copilot/claude-haiku-5.5#high");
-        assert_eq!(current_models(&cfg).get("brain").map(String::as_str), Some("github-copilot/claude-haiku-5.5#high"));
+        assert_eq!(
+            cfg["agents"]["plan"],
+            json!({"description":"d","model":"github-copilot/claude-sonnet-5.5"})
+        );
+        assert_eq!(
+            cfg["agents"]["brain"]["model"],
+            "github-copilot/claude-haiku-5.5#high"
+        );
+        assert_eq!(
+            current_models(&cfg).get("brain").map(String::as_str),
+            Some("github-copilot/claude-haiku-5.5#high")
+        );
         // removing the last field removes the entry, and an empty table is dropped
         let mut only = json!({"agents":{"a":{"model":"x/y"}}});
         apply_models(&mut only, &BTreeMap::from([("a".to_string(), None)]));
         assert!(only.get("agents").is_none());
         // a v1 `agent` table is kept as is
         let mut v1 = json!({"agent":{"plan":{"model":"p/m"}}});
-        apply_models(&mut v1, &BTreeMap::from([("brain".to_string(), Some("p/n".to_string()))]));
+        apply_models(
+            &mut v1,
+            &BTreeMap::from([("brain".to_string(), Some("p/n".to_string()))]),
+        );
         assert_eq!(v1["agent"]["brain"]["model"], "p/n");
         assert!(v1.get("agents").is_none());
     }
 
     #[test]
     fn keys_drive_the_picker() {
-        let models = avail(&["github-copilot/claude-haiku-5.5", "github-copilot/claude-sonnet-5.5", "github-copilot/gpt-6.1-sol"]);
-        let rows = build_rows(vec![("brain".into(), "".into(), None), ("code-reviewer".into(), "".into(), None)], &BTreeMap::new(), &models);
+        let models = avail(&[
+            "github-copilot/claude-haiku-5.5",
+            "github-copilot/claude-sonnet-5.5",
+            "github-copilot/gpt-6.1-sol",
+        ]);
+        let rows = build_rows(
+            vec![
+                ("brain".into(), "".into(), None),
+                ("code-reviewer".into(), "".into(), None),
+            ],
+            &BTreeMap::new(),
+            &models,
+        );
         let mut app = App::new(rows, models);
         assert_eq!(app.rows[0].agent, "brain");
         // pick by typing a filter: enter opens, type "sol", enter chooses the first match
@@ -749,12 +1025,21 @@ mod tests {
         }
         app.key(key(KeyCode::Down)); // index 0 is "(no override)", 1 is the first match
         app.key(key(KeyCode::Enter));
-        assert_eq!(app.rows[0].choice.as_deref(), Some("github-copilot/gpt-6.1-sol"));
+        assert_eq!(
+            app.rows[0].choice.as_deref(),
+            Some("github-copilot/gpt-6.1-sol")
+        );
         assert_eq!(app.changed(), 1);
         // r applies every recommendation, u undoes, c clears
         app.key(key(KeyCode::Char('r')));
-        assert_eq!(app.rows[0].choice.as_deref(), Some("github-copilot/claude-haiku-5.5"));
-        assert_eq!(app.rows[1].choice.as_deref(), Some("github-copilot/gpt-6.1-sol"));
+        assert_eq!(
+            app.rows[0].choice.as_deref(),
+            Some("github-copilot/claude-haiku-5.5")
+        );
+        assert_eq!(
+            app.rows[1].choice.as_deref(),
+            Some("github-copilot/gpt-6.1-sol")
+        );
         app.key(key(KeyCode::Char('u')));
         assert_eq!(app.changed(), 0);
         app.key(key(KeyCode::Char('c')));
@@ -774,15 +1059,31 @@ mod tests {
     fn the_screen_renders() {
         use ratatui::{Terminal, backend::TestBackend};
         let models = avail(&["github-copilot/claude-haiku-5.5"]);
-        let rows = build_rows(vec![("orchestrator".into(), "".into(), None)], &BTreeMap::new(), &models);
+        let rows = build_rows(
+            vec![("orchestrator".into(), "".into(), None)],
+            &BTreeMap::new(),
+            &models,
+        );
         let mut app = App::new(rows, models);
         let mut term = Terminal::new(TestBackend::new(110, 24)).unwrap();
         term.draw(|f| draw(f, &app)).unwrap();
-        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("orchestrator") && text.contains("Agent models"));
         app.key(key(KeyCode::Enter));
         term.draw(|f| draw(f, &app)).unwrap();
-        let text: String = term.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+        let text: String = term
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("model for orchestrator") && text.contains("claude-haiku-5.5"));
     }
 
@@ -791,7 +1092,12 @@ mod tests {
         let mut v: Vec<(String, Option<String>)> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
-            .map(|e| (e.path().file_stem().unwrap().to_string_lossy().into_owned(), frontmatter_model(&e.path())))
+            .map(|e| {
+                (
+                    e.path().file_stem().unwrap().to_string_lossy().into_owned(),
+                    frontmatter_model(&e.path()),
+                )
+            })
             .collect();
         v.sort();
         v
@@ -800,46 +1106,100 @@ mod tests {
     #[test]
     fn every_template_carries_the_recommended_model_of_its_tier() {
         let t = templates();
-        assert!(t.len() >= 21, "expected all agent templates, saw {}", t.len());
+        assert!(
+            t.len() >= 21,
+            "expected all agent templates, saw {}",
+            t.len()
+        );
         for (name, model) in t {
             let tier = tier_for(&name).unwrap_or_else(|| panic!("{name}: no tier in tier_for()"));
             let want = format!("github-copilot/{}", tier.list()[0]);
-            assert_eq!(model.as_deref(), Some(want.as_str()), "{name}: template model must be its tier's first choice");
+            assert_eq!(
+                model.as_deref(),
+                Some(want.as_str()),
+                "{name}: template model must be its tier's first choice"
+            );
         }
     }
 
     #[test]
     fn the_shipped_policy_allows_every_template_model_and_keeps_readonly_agents_cheap() {
-        let policy = crate::model_guard::load_policy(&Path::new(env!("CARGO_MANIFEST_DIR")).join("model-policy.json")).unwrap();
+        let policy = crate::model_guard::load_policy(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("model-policy.json"),
+        )
+        .unwrap();
         let t = templates();
         for (name, model) in &t {
             let m = model.as_deref().unwrap();
             let c = crate::model_guard::check(m, Some(&policy));
-            assert!(c.ok, "{name}: {m} must be allowed by the shipped policy: {:?}", c.reason);
-            assert_eq!(policy.agent_defaults.get(name).map(String::as_str), Some(m), "{name}: agentDefaults must match the template");
+            assert!(
+                c.ok,
+                "{name}: {m} must be allowed by the shipped policy: {:?}",
+                c.reason
+            );
+            assert_eq!(
+                policy.agent_defaults.get(name).map(String::as_str),
+                Some(m),
+                "{name}: agentDefaults must match the template"
+            );
         }
         for name in &policy.read_only_agents {
             if let Some((_, Some(m))) = t.iter().find(|(n, _)| n == name) {
-                assert_eq!(crate::model_guard::check(m, Some(&policy)).tier.as_deref(), Some("cheap"), "{name} is listed read-only, so it must use a cheap model");
+                assert_eq!(
+                    crate::model_guard::check(m, Some(&policy)).tier.as_deref(),
+                    Some("cheap"),
+                    "{name} is listed read-only, so it must use a cheap model"
+                );
             }
         }
     }
 
     #[test]
     fn current_model_comes_from_the_agent_file_unless_the_config_overrides_it() {
-        let models = avail(&["github-copilot/claude-haiku-5.5", "github-copilot/claude-sonnet-5.5"]);
+        let models = avail(&[
+            "github-copilot/claude-haiku-5.5",
+            "github-copilot/claude-sonnet-5.5",
+        ]);
         let agents = vec![
-            ("brain".to_string(), "".to_string(), Some("github-copilot/claude-haiku-5.5".to_string())),
-            ("plan".to_string(), "".to_string(), Some("github-copilot/claude-opus-5.5".to_string())), // not available here
-            ("mentor".to_string(), "".to_string(), Some("github-copilot/claude-haiku-5.5".to_string())),
+            (
+                "brain".to_string(),
+                "".to_string(),
+                Some("github-copilot/claude-haiku-5.5".to_string()),
+            ),
+            (
+                "plan".to_string(),
+                "".to_string(),
+                Some("github-copilot/claude-opus-5.5".to_string()),
+            ), // not available here
+            (
+                "mentor".to_string(),
+                "".to_string(),
+                Some("github-copilot/claude-haiku-5.5".to_string()),
+            ),
         ];
-        let cfg = BTreeMap::from([("mentor".to_string(), "github-copilot/claude-sonnet-5.5#high".to_string())]);
+        let cfg = BTreeMap::from([(
+            "mentor".to_string(),
+            "github-copilot/claude-sonnet-5.5#high".to_string(),
+        )]);
         let rows = build_rows(agents, &cfg, &models);
         let by = |n: &str| rows.iter().find(|r| r.agent == n).unwrap();
-        assert_eq!(by("brain").current.as_deref(), Some("github-copilot/claude-haiku-5.5"));
+        assert_eq!(
+            by("brain").current.as_deref(),
+            Some("github-copilot/claude-haiku-5.5")
+        );
         assert!(!by("brain").unavailable);
-        assert!(by("plan").unavailable, "a model this opencode lacks is flagged");
-        assert_eq!(by("mentor").current.as_deref(), Some("github-copilot/claude-sonnet-5.5#high"), "config wins");
-        assert!(!by("mentor").unavailable, "a #variant does not make it unavailable");
+        assert!(
+            by("plan").unavailable,
+            "a model this opencode lacks is flagged"
+        );
+        assert_eq!(
+            by("mentor").current.as_deref(),
+            Some("github-copilot/claude-sonnet-5.5#high"),
+            "config wins"
+        );
+        assert!(
+            !by("mentor").unavailable,
+            "a #variant does not make it unavailable"
+        );
     }
 }

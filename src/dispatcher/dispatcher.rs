@@ -25,13 +25,13 @@
 //!      DISPATCH_DRY_RUN=1 (log only), OPENCODE_BIN (opencode), A2A_DISPATCHER_PID (pidfile path),
 //!      DISPATCH_BACKEND (opencode | claude; default opencode), DISPATCH_BACKEND_<AGENT> (one agent's
 //!      backend; AGENT upper-case, every non-alphanumeric character `_`), CLAUDE_BIN (claude)
-use crate::hub::db::{self, TaskRow, iso_ago_ms, now, parse_ms};
-use crate::hub::project::{clear_project_cache, project_root, same_project};
 use super::backend::{self, Backend, SessionState};
+use crate::hub::db::{self, iso_ago_ms, now, parse_ms, TaskRow};
+use crate::hub::project::{clear_project_cache, project_root, same_project};
 use crate::{opencode, paths, sys};
 use regex::Regex;
-use rusqlite::{Connection, params};
-use serde_json::{Value, json};
+use rusqlite::{params, Connection};
+use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -43,7 +43,13 @@ fn e<E: ToString>(err: E) -> String {
     err.to_string()
 }
 
-const WAKE_REQUESTER: [&str; 5] = ["input-required", "auth-required", "completed", "failed", "rejected"];
+const WAKE_REQUESTER: [&str; 5] = [
+    "input-required",
+    "auth-required",
+    "completed",
+    "failed",
+    "rejected",
+];
 
 pub(super) fn log(msg: &str) {
     println!("{} {msg}", now());
@@ -54,7 +60,9 @@ const MAX_ATTEMPTS: i64 = 5;
 
 /// Delay before attempt `attempt + 1` (attempt counts from 1): base, base*3, base*9, ... max 2 min.
 fn retry_delay_ms(attempt: i64, base_ms: u64) -> i64 {
-    (base_ms as i64).saturating_mul(3_i64.saturating_pow((attempt - 1).max(0) as u32)).min(120_000.max(base_ms as i64))
+    (base_ms as i64)
+        .saturating_mul(3_i64.saturating_pow((attempt - 1).max(0) as u32))
+        .min(120_000.max(base_ms as i64))
 }
 
 pub(super) fn first_line(s: &str) -> &str {
@@ -66,6 +74,7 @@ pub(super) fn first_line(s: &str) -> &str {
 #[derive(Debug, PartialEq)]
 struct Choice {
     default: &'static str,
+    global: Option<&'static str>,
     per_agent: HashMap<String, &'static str>,
 }
 
@@ -74,7 +83,16 @@ const BACKEND_VAR: &str = "DISPATCH_BACKEND";
 
 /// `mentor-2` -> `MENTOR_2`: how an agent name is spelled in an environment variable.
 fn env_key(agent: &str) -> String {
-    agent.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' }).collect()
+    agent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn known_backend(name: &str) -> Option<&'static str> {
@@ -83,27 +101,50 @@ fn known_backend(name: &str) -> Option<&'static str> {
 
 impl Choice {
     fn from_vars(vars: impl Iterator<Item = (String, String)>) -> Choice {
-        let (mut default, mut per_agent) = (DEFAULT_BACKEND, HashMap::new());
+        let (mut default, mut global, mut per_agent) = (DEFAULT_BACKEND, None, HashMap::new());
         for (key, value) in vars {
-            let Some(name) = known_backend(&value) else { continue };
+            let Some(name) = known_backend(&value) else {
+                continue;
+            };
             match key.strip_prefix(BACKEND_VAR) {
-                Some("") => default = name,
+                Some("") => {
+                    default = name;
+                    global = Some(name);
+                }
                 Some(agent) if agent.starts_with('_') => {
                     per_agent.insert(agent[1..].to_ascii_uppercase(), name);
                 }
                 _ => {}
             }
         }
-        Choice { default, per_agent }
+        Choice {
+            default,
+            global,
+            per_agent,
+        }
     }
 
     fn of(&self, agent: &str) -> &'static str {
-        self.per_agent.get(&env_key(agent)).copied().unwrap_or(self.default)
+        self.per_agent
+            .get(&env_key(agent))
+            .copied()
+            .unwrap_or(self.default)
+    }
+
+    /// Configuration seam for automatic routing: explicit values are kept separate from the
+    /// legacy OpenCode default so the resolver can apply identity only when no override exists.
+    pub(super) fn overrides(&self, agent: &str) -> (Option<&str>, Option<&str>) {
+        let per_agent = self.per_agent.get(&env_key(agent)).copied();
+        (per_agent, self.global)
     }
 
     /// Every backend that has to be running.
     fn used(&self) -> BTreeSet<&'static str> {
-        self.per_agent.values().copied().chain([self.default]).collect()
+        self.per_agent
+            .values()
+            .copied()
+            .chain([self.default])
+            .collect()
     }
 }
 
@@ -155,8 +196,13 @@ fn acquire_lock(pid_file: &std::path::Path) -> R<Lock> {
             match std::fs::hard_link(&tmp, pid_file) {
                 Ok(()) => return Ok(Lock::Held),
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    match std::fs::read_to_string(pid_file).ok().and_then(|t| t.trim().parse::<u32>().ok()) {
-                        Some(pid) if pid != me && pid_is_dispatcher(pid) => return Ok(Lock::Other(pid as i64)),
+                    match std::fs::read_to_string(pid_file)
+                        .ok()
+                        .and_then(|t| t.trim().parse::<u32>().ok())
+                    {
+                        Some(pid) if pid != me && pid_is_dispatcher(pid) => {
+                            return Ok(Lock::Other(pid as i64));
+                        }
                         Some(_) => {
                             let _ = std::fs::remove_file(pid_file); // stale: its owner is gone
                         }
@@ -205,13 +251,50 @@ impl Dispatcher {
     /// The backend that runs `agent`'s sessions.
     fn backend_for(&self, agent: &str) -> &dyn Backend {
         let name = self.cfg.choice.of(agent);
-        self.backends.iter().find(|b| b.name() == name).unwrap_or(&self.backends[0]).as_ref()
+        self.backends
+            .iter()
+            .find(|b| b.name() == name)
+            .unwrap_or(&self.backends[0])
+            .as_ref()
+    }
+
+    /// A task's context routing is stable after creation; environment changes must not move it.
+    fn task_backend_name(&self, t: &TaskRow, agent: &str) -> &'static str {
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT metadata FROM contexts WHERE id = ?",
+                [&t.context_id],
+                |r| r.get(0),
+            )
+            .ok();
+        match stored_backend_name(stored.as_deref()) {
+            Ok(Some(name)) => name,
+            Ok(None) => self.cfg.choice.of(agent),
+            Err(()) => {
+                log("invalid persisted backend; using safe OpenCode routing");
+                "opencode"
+            }
+        }
+    }
+
+    fn backend_for_task(&self, t: &TaskRow, agent: &str) -> &dyn Backend {
+        let name = self.task_backend_name(t, agent);
+        self.backends
+            .iter()
+            .find(|b| b.name() == name)
+            .map(|b| b.as_ref())
+            .unwrap_or_else(|| self.backend_for(agent))
     }
 
     /// Sessions running a turn in any backend in use (cached for 1.5 s). A backend that cannot be
     /// asked keeps the previous answer.
     fn active_sessions(&mut self) -> HashSet<String> {
-        if self.active.0.is_some_and(|at| at.elapsed() < Duration::from_millis(1500)) {
+        if self
+            .active
+            .0
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(1500))
+        {
             return self.active.1.clone();
         }
         let asked: R<Vec<HashSet<String>>> = self.backends.iter().map(|b| b.active_ids()).collect();
@@ -224,9 +307,27 @@ impl Dispatcher {
 
     /// The registered, still existing session of `agent` for the project of `dir`.
     fn agent_session(&self, agent: &str, dir: &str) -> R<Option<String>> {
-        let backend = self.backend_for(agent);
-        let rows = db::sessions(&self.conn, "WHERE agent = ? AND status = 'live' ORDER BY created_at DESC", &[agent])?;
-        let mine = rows.iter().filter(|r| r.backend.as_deref() == backend.stored_name());
+        self.agent_session_backend(self.backend_for(agent), agent, dir)
+    }
+
+    fn agent_session_with(&self, t: &TaskRow, agent: &str, dir: &str) -> R<Option<String>> {
+        self.agent_session_backend(self.backend_for_task(t, agent), agent, dir)
+    }
+
+    fn agent_session_backend(
+        &self,
+        backend: &dyn Backend,
+        agent: &str,
+        dir: &str,
+    ) -> R<Option<String>> {
+        let rows = db::sessions(
+            &self.conn,
+            "WHERE agent = ? AND status = 'live' ORDER BY created_at DESC",
+            &[agent],
+        )?;
+        let mine = rows
+            .iter()
+            .filter(|r| r.backend.as_deref() == backend.stored_name());
         for r in mine.filter(|r| r.directory == dir || same_project(dir, &r.directory)) {
             let state = backend.session_state(&r.session_id, &r.directory);
             if state == SessionState::Usable {
@@ -238,8 +339,15 @@ impl Dispatcher {
                     params![r.agent, r.directory, r.session_id],
                 )
                 .map_err(e)?;
-            let why = if state == SessionState::FolderGone { "its folder no longer exists" } else { "it no longer exists" };
-            log(&format!("session {} for {agent}: {why}; marked stale", r.session_id));
+            let why = if state == SessionState::FolderGone {
+                "its folder no longer exists"
+            } else {
+                "it no longer exists"
+            };
+            log(&format!(
+                "stale {} session for agent {agent} ({why}); marked stale",
+                backend.name()
+            ));
         }
         Ok(None)
     }
@@ -247,38 +355,64 @@ impl Dispatcher {
     /// Where a result goes: the session the task was sent from, else the requester's own
     /// registered session, else the newest session open in the folder.
     fn requester_session(&self, t: &TaskRow, directory: Option<&str>) -> R<Option<String>> {
-        let backend = self.backend_for(&t.from_agent);
+        let backend = self.backend_for_task(t, &t.from_agent);
         if let Some(id) = t.from_session.as_deref().filter(|s| !s.is_empty()) {
-            if let Some(found) = backend.sent_from(id) {
-                return Ok(Some(found));
+            let rows = db::sessions(
+                &self.conn,
+                "WHERE agent = ? AND session_id = ? AND status = 'live'",
+                &[&t.from_agent, id],
+            )?;
+            if rows.iter().any(|r| {
+                r.backend.as_deref() == backend.stored_name()
+                    && directory.is_some_and(|d| d == r.directory || same_project(d, &r.directory))
+            }) || (backend.name() == "opencode" && backend.session_matches(id, directory))
+            {
+                if let Some(found) = backend
+                    .sent_from(id)
+                    .or_else(|| Some(id.to_owned()).filter(|_| backend.name() == "claude"))
+                {
+                    return Ok(Some(found));
+                }
             }
-            log(&format!("session {id} of task {} no longer exists or its folder is gone", &t.id[..8]));
+            log(&format!(
+                "stored requester session mismatch for task {}",
+                &t.id[..8]
+            ));
         }
-        let Some(dir) = directory else { return Ok(None) };
-        if let Some(id) = self.agent_session(&t.from_agent, dir)? {
+        let Some(dir) = directory else {
+            return Ok(None);
+        };
+        if let Some(id) = self.agent_session_with(t, &t.from_agent, dir)? {
             return Ok(Some(id));
         }
         Ok(backend.newest_in(dir))
     }
 
     /// The assignee's own session in this project; created (and shown as a tab) the first time.
-    fn assignee_session(&mut self, agent: &str, dir: &str) -> Result<String, String> {
-        if let Some(id) = self.agent_session(agent, dir)? {
+    fn assignee_session(&mut self, t: &TaskRow, agent: &str, dir: &str) -> Result<String, String> {
+        if let Some(id) = self.agent_session_with(t, agent, dir)? {
             return Ok(id);
         }
         if agent == "orchestrator" {
             // the orchestrator is the user's own session; results return to it, and the dispatcher
             // must never open a second one
-            return Err(format!("no open orchestrator session in {dir}; open `oc` in that folder (the dispatcher never starts an orchestrator)"));
+            return Err(format!(
+                "no open orchestrator session in {dir}; open `oc` in that folder (the dispatcher never starts an orchestrator)"
+            ));
         }
         if !self.cfg.auto_open {
             return Err("opening sessions is disabled (DISPATCH_AUTO_OPEN=0)".into());
         }
-        let backend = self.backend_for(agent);
-        let r = backend.create_session(agent, dir).map_err(|err| format!("session create failed: {}", first_line(&err)))?;
+        let backend = self.backend_for_task(t, agent);
+        let r = backend
+            .create_session(agent, dir)
+            .map_err(|err| format!("session create failed: {}", first_line(&err)))?;
         let root = project_root(dir).unwrap_or_else(|| dir.to_string());
         self.conn
-            .execute("UPDATE sessions SET status='stale' WHERE agent=? AND directory=?", params![agent, root])
+            .execute(
+                "UPDATE sessions SET status='stale' WHERE agent=? AND directory=?",
+                params![agent, root],
+            )
             .map_err(e)?;
         db::ensure_agent(&self.conn, agent).map_err(e)?;
         self.conn
@@ -293,16 +427,35 @@ impl Dispatcher {
 
     /// Wake `agent` in `session`: switch the session to it, then queue the prompt. `Ok(false)` =
     /// the session is mid-turn; try again on a later tick.
-    fn deliver(&mut self, session: &str, agent: &str, dir: Option<&str>, text: &str) -> R<bool> {
+    fn deliver_named(
+        &mut self,
+        name: &str,
+        session: &str,
+        agent: &str,
+        dir: Option<&str>,
+        text: &str,
+    ) -> R<bool> {
         if self.active_sessions().contains(session) {
             return Ok(false);
         }
-        self.backend_for(agent).send(session, agent, dir, text)
+        let backend = self
+            .backends
+            .iter()
+            .find(|b| b.name() == name)
+            .map(|b| b.as_ref())
+            .unwrap_or_else(|| self.backend_for(agent));
+        backend.send(session, agent, dir, text)
+    }
+
+    fn deliver(&mut self, session: &str, agent: &str, dir: Option<&str>, text: &str) -> R<bool> {
+        let name = self.cfg.choice.of(agent);
+        self.deliver_named(name, session, agent, dir, text)
     }
 
     /// Valid assignee: a name of the right shape that the agent's backend knows.
-    fn agent_known(&self, name: &str, dir: Option<&str>) -> bool {
-        Regex::new(r"^[A-Za-z0-9._-]+$").unwrap().is_match(name) && self.backend_for(name).agent_known(name, dir)
+    fn agent_known(&self, t: &TaskRow, name: &str, dir: Option<&str>) -> bool {
+        Regex::new(r"^[A-Za-z0-9._-]+$").unwrap().is_match(name)
+            && self.backend_for_task(t, name).agent_known(name, dir)
     }
 
     /// A task without a folder inherits the requester's stored folder, else its newest live session's.
@@ -313,7 +466,11 @@ impl Dispatcher {
         if let Some(d) = t.from_directory.as_ref().filter(|d| !d.is_empty()) {
             return Ok(Some(d.clone()));
         }
-        let rows = db::sessions(&self.conn, "WHERE agent = ? AND status = 'live' ORDER BY created_at DESC", &[&t.from_agent])?;
+        let rows = db::sessions(
+            &self.conn,
+            "WHERE agent = ? AND status = 'live' ORDER BY created_at DESC",
+            &[&t.from_agent],
+        )?;
         Ok(rows.into_iter().next().map(|r| r.directory))
     }
 
@@ -331,7 +488,11 @@ impl Dispatcher {
     fn allowed_hops(&self, context_id: &str) -> i64 {
         let grants: i64 = self
             .conn
-            .query_row("SELECT grants FROM hop_allow WHERE context_id = ?", [context_id], |r| r.get(0))
+            .query_row(
+                "SELECT grants FROM hop_allow WHERE context_id = ?",
+                [context_id],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         self.cfg.max_hops * (1 + grants)
     }
@@ -340,7 +501,11 @@ impl Dispatcher {
     fn announce_cap(&self, t: &TaskRow, n: i64, allowed: i64) -> R<()> {
         let notified: Option<i64> = self
             .conn
-            .query_row("SELECT notified_level FROM hop_allow WHERE context_id = ?", [&t.context_id], |r| r.get(0))
+            .query_row(
+                "SELECT notified_level FROM hop_allow WHERE context_id = ?",
+                [&t.context_id],
+                |r| r.get(0),
+            )
             .ok();
         if notified.is_some_and(|l| l >= allowed) {
             return Ok(());
@@ -383,7 +548,11 @@ impl Dispatcher {
     /// A requester reply containing "continue" on a capped context raises the allowance by MAX_HOPS.
     fn check_continue(&self) -> R<()> {
         let cont = Regex::new(r"(?i)\bcontinue\b").unwrap();
-        let rows = db::tasks(&self.conn, "WHERE state = 'submitted' AND updated_at > ?", &[&iso_ago_ms(86_400_000)])?;
+        let rows = db::tasks(
+            &self.conn,
+            "WHERE state = 'submitted' AND updated_at > ?",
+            &[&iso_ago_ms(86_400_000)],
+        )?;
         for t in rows {
             let Ok((notified, last)) = self.conn.query_row(
                 "SELECT notified_level, last_continue_msg FROM hop_allow WHERE context_id = ?",
@@ -395,7 +564,10 @@ impl Dispatcher {
             if notified < self.allowed_hops(&t.context_id) {
                 continue; // not currently capped
             }
-            let Ok(m) = serde_json::from_str::<Value>(t.status_message.as_deref().unwrap_or("{}")) else { continue };
+            let Ok(m) = serde_json::from_str::<Value>(t.status_message.as_deref().unwrap_or("{}"))
+            else {
+                continue;
+            };
             let msg_id = m["messageId"].as_str().unwrap_or("");
             if m["role"] != "user" || m["from"] == "dispatcher" || last.as_deref() == Some(msg_id) {
                 continue;
@@ -436,7 +608,14 @@ impl Dispatcher {
     }
 
     fn event(&self, t: &TaskRow, kind: &str, agent: &str, detail: &str) {
-        db::record_event(&self.conn, Some(&t.id), Some(&t.context_id), kind, Some(agent), Some(detail));
+        db::record_event(
+            &self.conn,
+            Some(&t.id),
+            Some(&t.context_id),
+            kind,
+            Some(agent),
+            Some(detail),
+        );
     }
 
     /// Claim (task, status message, kind) in the shared database. `true` = we own it. The insert is
@@ -489,6 +668,7 @@ impl Dispatcher {
     }
 
     fn nudge(&mut self, t: &TaskRow, kind: &str, target: &str, directory: Option<&str>) -> R<()> {
+        let backend_name = self.task_backend_name(t, target);
         let key = format!("{}:{}:{kind}", t.id, status_message_id(t));
         if self.nudge_busy(&key) {
             return Ok(());
@@ -497,17 +677,23 @@ impl Dispatcher {
         if n >= allowed && !status_text(t).starts_with("hop_cap:") {
             return self.announce_cap(t, n, allowed);
         }
-        if kind == "assignee" && !self.agent_known(target, directory) {
+        if kind == "assignee" && !self.agent_known(t, target, directory) {
             if !self.insert_nudge(&key, t, target, "no-agent")? {
                 return Ok(()); // another dispatcher already handled it
             }
             self.finish_nudge(&key, "dead", 0, Some("no agent"));
             self.event(t, "no_agent", target, target);
-            log(&format!("task {}: no agent file for \"{target}\"; failing it", &t.id[..8]));
+            log(&format!(
+                "task {}: no agent file for \"{target}\"; failing it",
+                &t.id[..8]
+            ));
             return self.post_system_message(
                 t,
                 "failed",
-                &format!("no_agent: {} has no agent named \"{target}\" (see a2a_list_agents).", self.backend_for(target).name()),
+                &format!(
+                    "no_agent: {} has no agent named \"{target}\" (see a2a_list_agents).",
+                    backend_name
+                ),
             );
         }
         // Claim before doing anything with side effects (opening a session, prompting it).
@@ -522,7 +708,10 @@ impl Dispatcher {
             if !std::path::Path::new(d).is_dir() {
                 self.event(t, "directory_missing", target, d);
                 self.finish_nudge(&key, "dead", 0, Some("directory missing"));
-                log(&format!("task {}: folder {d} does not exist; failing it", &t.id[..8]));
+                log(&format!(
+                    "task {}: folder {d} does not exist; failing it",
+                    &t.id[..8]
+                ));
                 return self.post_system_message(
                     t,
                     "failed",
@@ -533,55 +722,84 @@ impl Dispatcher {
         let session: Result<String, String> = if kind == "assignee" {
             match directory {
                 None => Err("the task has no folder".into()),
-                Some(d) if self.cfg.dry => match self.agent_session(target, d)? {
+                Some(d) if self.cfg.dry => match self.agent_session_with(t, target, d)? {
                     Some(id) => Ok(id),
                     None => {
-                        log(&format!("[dry] would open a new session for {target} in {d}"));
+                        log(&format!(
+                            "[dry] would open a new session for {target} in {d}"
+                        ));
                         self.finish_nudge(&key, "delivered", 0, None);
                         return Ok(());
                     }
                 },
-                Some(d) => self.assignee_session(target, d),
+                Some(d) => self.assignee_session(t, target, d),
             }
         } else {
-            self.requester_session(t, directory)?.ok_or_else(|| "no open session".to_string())
+            self.requester_session(t, directory)?
+                .ok_or_else(|| "no open session".to_string())
         };
         let session = match session {
             Ok(id) => id,
             Err(why) => {
                 self.event(t, "no_session", target, &why);
-                let _ = self.conn.execute("UPDATE nudges SET kind = 'no-session' WHERE key = ?", [&key]);
+                let _ = self.conn.execute(
+                    "UPDATE nudges SET kind = 'no-session' WHERE key = ?",
+                    [&key],
+                );
                 self.finish_nudge(&key, "dead", 0, Some(&why));
                 if kind == "assignee" {
                     let in_dir = directory.map(|d| format!(" in {d}")).unwrap_or_default();
-                    log(&format!("no session for {target}{in_dir} ({why}); telling requester {}", t.from_agent));
+                    log(&format!(
+                        "no session for {target}{in_dir} ({why}); telling requester {}",
+                        t.from_agent
+                    ));
                     self.post_system_message(
                         t,
                         "input-required",
                         &format!("no_session: could not open a session for \"{target}\"{in_dir}: {why}. Fix that, then reply on this task to retry."),
                     )?;
                 } else {
-                    log(&format!("no open session for requester {target} ({why}); result stays in the hub (task {})", t.id));
+                    log(&format!(
+                        "no open session for requester {target} ({why}); result stays in the hub (task {})",
+                        t.id
+                    ));
                 }
                 return Ok(());
             }
         };
-        let text = nudge_text(kind, t, &self.backend_for(target).style());
+        let style = self
+            .backends
+            .iter()
+            .find(|b| b.name() == backend_name)
+            .map(|b| b.as_ref())
+            .unwrap_or_else(|| self.backend_for(target))
+            .style();
+        let text = nudge_text(kind, t, &style);
         if self.cfg.dry {
-            log(&format!("[dry] nudge {kind} -> {target} (session {session}) task {} state {}", &t.id[..8], t.state));
+            log(&format!(
+                "[dry] nudge {kind} -> {target} (session {session}) task {} state {}",
+                &t.id[..8],
+                t.state
+            ));
             self.finish_nudge(&key, "delivered", 0, None);
             return Ok(());
         }
-        match self.deliver(&session, target, directory, &text) {
+        match self.deliver_named(backend_name, &session, target, directory, &text) {
             Ok(true) => {
                 self.finish_nudge(&key, "delivered", 0, None);
                 if kind == "assignee" {
                     self.usage_baseline(t, target, &session);
                 }
                 self.event(t, "nudge_delivered", target, kind);
-                log(&format!("nudge {kind} -> {target} (session {session}) task {} state {}", &t.id[..8], t.state));
+                log(&format!(
+                    "nudge {kind} -> {target} (session {session}) task {} state {}",
+                    &t.id[..8],
+                    t.state
+                ));
                 if let (true, Some(d)) = (kind == "assignee", directory) {
-                    self.backend_for(target).request_tab(&session, target, d);
+                    if let Some(backend) = self.backends.iter().find(|b| b.name() == backend_name) {
+                        backend.request_tab(&session, target, d);
+                    }
                 }
             }
             Ok(false) => {
@@ -596,15 +814,38 @@ impl Dispatcher {
     /// A prompt could not be delivered: retry later with growing waits, or give up after
     /// MAX_ATTEMPTS. A 404 on the first attempt means the session is unusable (folder gone): it is
     /// retired and the retry is immediate, so the next try gets a fresh one.
-    fn delivery_failed(&self, t: &TaskRow, kind: &str, target: &str, session: &str, key: &str, err: &str) -> R<()> {
-        let attempt: i64 = self.conn.query_row("SELECT attempts FROM nudges WHERE key = ?", [key], |r| r.get(0)).unwrap_or(1);
+    fn delivery_failed(
+        &self,
+        t: &TaskRow,
+        kind: &str,
+        target: &str,
+        session: &str,
+        key: &str,
+        err: &str,
+    ) -> R<()> {
+        let attempt: i64 = self
+            .conn
+            .query_row("SELECT attempts FROM nudges WHERE key = ?", [key], |r| {
+                r.get(0)
+            })
+            .unwrap_or(1);
         let why = first_line(err);
-        log(&format!("prompt failed (task {}, session {session}, attempt {attempt}/{MAX_ATTEMPTS}): {why}", &t.id[..8]));
+        log(&format!(
+            "prompt failed (task {}, session {session}, attempt {attempt}/{MAX_ATTEMPTS}): {why}",
+            &t.id[..8]
+        ));
         let retire = why.contains("404") && attempt == 1;
-        let _ = retire.then(|| self.conn.execute("UPDATE sessions SET status='stale' WHERE session_id = ?", [session]));
+        let _ = retire.then(|| {
+            self.conn.execute(
+                "UPDATE sessions SET status='stale' WHERE session_id = ?",
+                [session],
+            )
+        });
         if attempt < MAX_ATTEMPTS {
             self.event(t, "nudge_released", target, "error");
-            let wait = (!retire).then(|| retry_delay_ms(attempt, self.cfg.retry_base_ms)).unwrap_or(0);
+            let wait = (!retire)
+                .then(|| retry_delay_ms(attempt, self.cfg.retry_base_ms))
+                .unwrap_or(0);
             self.finish_nudge(key, "pending", wait, Some(why));
             return Ok(());
         }
@@ -616,9 +857,16 @@ impl Dispatcher {
     fn give_up(&self, t: &TaskRow, kind: &str, target: &str, key: &str, why: &str) -> R<()> {
         self.event(t, "nudge_dead", target, why);
         self.finish_nudge(key, "dead", 0, Some(why));
-        log(&format!("giving up on {target} for task {} ({kind})", &t.id[..8]));
-        let text = format!("delivery_failed: could not hand the task to \"{target}\" after {MAX_ATTEMPTS} attempts ({why}). Fix that, then reply on this task to retry.");
-        (kind == "assignee").then_some(text).map_or(Ok(()), |m| self.post_system_message(t, "input-required", &m))
+        log(&format!(
+            "giving up on {target} for task {} ({kind})",
+            &t.id[..8]
+        ));
+        let text = format!(
+            "delivery_failed: could not hand the task to \"{target}\" after {MAX_ATTEMPTS} attempts ({why}). Fix that, then reply on this task to retry."
+        );
+        (kind == "assignee").then_some(text).map_or(Ok(()), |m| {
+            self.post_system_message(t, "input-required", &m)
+        })
     }
 
     /// Remember the assignee session's cumulative usage when it is handed the task, so what it
@@ -626,9 +874,19 @@ impl Dispatcher {
     fn usage_baseline(&self, t: &TaskRow, agent: &str, session: &str) {
         // a backend without usage figures (Claude: the transcript ingester counts those turns)
         // records no baseline, so nothing is settled for it either
-        let Some(u) = self.backend_for(agent).usage(session) else { return };
-        let detail = json!({ "session": session, "cum": u.to_json(), "model": u.model }).to_string();
-        db::record_event(&self.conn, Some(&t.id), Some(&t.context_id), "usage_baseline", Some(agent), Some(&detail));
+        let Some(u) = self.backend_for_task(t, agent).usage(session) else {
+            return;
+        };
+        let detail =
+            json!({ "session": session, "cum": u.to_json(), "model": u.model }).to_string();
+        db::record_event(
+            &self.conn,
+            Some(&t.id),
+            Some(&t.context_id),
+            "usage_baseline",
+            Some(agent),
+            Some(&detail),
+        );
     }
 
     /// Before the requester is woken: record what the assignee's session spent on this task since
@@ -643,9 +901,15 @@ impl Dispatcher {
                 |r| r.get(0),
             )
             .ok();
-        let Some(prev) = prev.and_then(|d| serde_json::from_str::<Value>(&d).ok()) else { return };
-        let Some(session) = prev["session"].as_str() else { return };
-        let Some(cur) = self.backend_for(&t.to_agent).usage(session) else { return };
+        let Some(prev) = prev.and_then(|d| serde_json::from_str::<Value>(&d).ok()) else {
+            return;
+        };
+        let Some(session) = prev["session"].as_str() else {
+            return;
+        };
+        let Some(cur) = self.backend_for_task(t, &t.to_agent).usage(session) else {
+            return;
+        };
         let delta = cur.since(&opencode::Usage::from_json(&prev["cum"], None));
         if delta.is_zero() && delta.cost == 0.0 {
             return;
@@ -689,7 +953,11 @@ impl Dispatcher {
         let since = iso_ago_ms(86_400_000);
         let mut params: Vec<&str> = WAKE_REQUESTER.to_vec();
         params.push(&since);
-        let finished = db::tasks(&self.conn, "WHERE state IN (?,?,?,?,?) AND updated_at > ? ORDER BY updated_at", &params)?;
+        let finished = db::tasks(
+            &self.conn,
+            "WHERE state IN (?,?,?,?,?) AND updated_at > ? ORDER BY updated_at",
+            &params,
+        )?;
         for mut t in finished {
             if t.from_agent == t.to_agent {
                 continue;
@@ -707,23 +975,40 @@ impl Dispatcher {
     /// The error the assignee's last turn ended with, when that turn ended after `since` (the
     /// hand-over). `None`: nothing to report, or no session to ask.
     fn failed_turn(&self, t: &TaskRow, since: &str, active: &HashSet<String>) -> R<Option<String>> {
-        let Some(dir) = t.directory.as_deref().filter(|_| !self.cfg.dry) else { return Ok(None) };
-        let Some(session) = self.agent_session(&t.to_agent, dir)? else { return Ok(None) };
+        let Some(dir) = t.directory.as_deref().filter(|_| !self.cfg.dry) else {
+            return Ok(None);
+        };
+        let Some(session) = self.agent_session_with(t, &t.to_agent, dir)? else {
+            return Ok(None);
+        };
         if active.contains(&session) {
             return Ok(None);
         }
-        Ok(self.backend_for(&t.to_agent).failure_since(&session, parse_ms(since)))
+        Ok(self
+            .backend_for_task(t, &t.to_agent)
+            .failure_since(&session, parse_ms(since)))
     }
 
     fn fail_for_agent_error(&self, t: &TaskRow, err: &str) -> R<()> {
-        log(&format!("task {}: {}'s turn failed ({err}); failing the task", &t.id[..8], t.to_agent));
+        log(&format!(
+            "task {}: {}'s turn failed ({err}); failing the task",
+            &t.id[..8],
+            t.to_agent
+        ));
         self.event(t, "agent_error", &t.to_agent, err);
-        let text = format!("agent_error: {}'s turn failed: {err}. Fix that (model, credentials), then send the task again.", t.to_agent);
+        let text = format!(
+            "agent_error: {}'s turn failed: {err}. Fix that (model, credentials), then send the task again.",
+            t.to_agent
+        );
         self.post_system_message(t, "failed", &text)
     }
 
     fn stall_check(&mut self) -> R<()> {
-        let open = db::tasks(&self.conn, "WHERE state IN ('submitted','working') AND to_agent != 'any'", &[])?;
+        let open = db::tasks(
+            &self.conn,
+            "WHERE state IN ('submitted','working') AND to_agent != 'any'",
+            &[],
+        )?;
         let active = self.active_sessions();
         for t in open {
             let last: Option<String> = self
@@ -746,39 +1031,71 @@ impl Dispatcher {
                 continue;
             }
             let session = match t.directory.as_deref() {
-                Some(d) => self.agent_session(&t.to_agent, d)?,
+                Some(d) => self.agent_session_with(&t, &t.to_agent, d)?,
                 None => None,
             };
             if session.as_ref().is_some_and(|s| active.contains(s)) {
                 continue; // still working
             }
-            let retried = db::exists(&self.conn, "SELECT 1 FROM nudges WHERE task_id = ? AND kind = 'stall-retry'", &[&t.id]);
+            let retried = db::exists(
+                &self.conn,
+                "SELECT 1 FROM nudges WHERE task_id = ? AND kind = 'stall-retry'",
+                &[&t.id],
+            );
             if !retried {
-                log(&format!("stalled task {} ({}); retrying once", &t.id[..8], t.to_agent));
+                log(&format!(
+                    "stalled task {} ({}); retrying once",
+                    &t.id[..8],
+                    t.to_agent
+                ));
                 let sr_key = format!("{}:stall-retry", t.id);
                 if self.insert_nudge(&sr_key, &t, &t.to_agent, "stall-retry")? {
                     self.finish_nudge(&sr_key, "delivered", 0, None);
                 }
-                self.event(&t, "stall_retry", &t.to_agent, &format!("{}s", age_s.round()));
+                self.event(
+                    &t,
+                    "stall_retry",
+                    &t.to_agent,
+                    &format!("{}s", age_s.round()),
+                );
                 if let (false, Some(s)) = (self.cfg.dry, &session) {
-                    let text = nudge_text("assignee", &t, &self.backend_for(&t.to_agent).style());
-                    if let Err(err) = self.deliver(s, &t.to_agent, t.directory.as_deref(), &text) {
+                    let style = self.backend_for_task(&t, &t.to_agent).style();
+                    let text = nudge_text("assignee", &t, &style);
+                    if let Err(err) = self.deliver_named(
+                        self.task_backend_name(&t, &t.to_agent),
+                        s,
+                        &t.to_agent,
+                        t.directory.as_deref(),
+                        &text,
+                    ) {
                         log(&format!("retry failed: {}", first_line(&err)));
                     }
                 }
             } else if age_s > (self.cfg.stall_secs * 2) as f64 {
-                log(&format!("task {} still stalled; marking failed", &t.id[..8]));
+                log(&format!(
+                    "task {} still stalled; marking failed",
+                    &t.id[..8]
+                ));
                 self.conn
                     .execute(
                         "INSERT OR IGNORE INTO nudges (key, task_id, context_id, target, kind, status, delivered_at, created_at, updated_at) VALUES (?,?,?,?,?,'delivered',?,?,?)",
                         params![format!("{}:stall-failed", t.id), t.id, t.context_id, t.to_agent, "stall-failed", now(), now(), now()],
                     )
                     .map_err(e)?;
-                self.event(&t, "stall_failed", &t.to_agent, &format!("{}s", age_s.round()));
+                self.event(
+                    &t,
+                    "stall_failed",
+                    &t.to_agent,
+                    &format!("{}s", age_s.round()),
+                );
                 self.post_system_message(
                     &t,
                     "failed",
-                    &format!("stalled: {} did not report after {}s and one retry.", t.to_agent, age_s.round()),
+                    &format!(
+                        "stalled: {} did not report after {}s and one retry.",
+                        t.to_agent,
+                        age_s.round()
+                    ),
                 )?;
             }
         }
@@ -796,15 +1113,42 @@ impl Dispatcher {
                 )
                 .map_err(e)?;
         }
-        log(&format!("baseline: {} finished task(s) marked as already handled", rows.len()));
+        log(&format!(
+            "baseline: {} finished task(s) marked as already handled",
+            rows.len()
+        ));
         Ok(())
+    }
+}
+
+/// Returns `Ok(None)` for legacy contexts without a routing association and `Err(())` for a
+/// malformed or unsupported persisted association. Invalid stored values fail closed to OpenCode.
+fn stored_backend_name(metadata: Option<&str>) -> Result<Option<&'static str>, ()> {
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    let value = serde_json::from_str::<Value>(metadata).map_err(|_| ())?;
+    let Some(routing) = value.get("routing") else {
+        return Ok(None);
+    };
+    let Some(routing) = routing.as_object() else {
+        return Err(());
+    };
+    let Some(backend) = routing.get("backend") else {
+        return Err(());
+    };
+    match backend.as_str() {
+        Some("opencode") => Ok(Some("opencode")),
+        Some("claude") => Ok(Some("claude")),
+        _ => Err(()),
     }
 }
 
 const NUDGE_LEASE_MS: i64 = 60_000;
 
 fn iso_after_ms(ms: i64) -> String {
-    (chrono::Utc::now() + chrono::Duration::milliseconds(ms)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    (chrono::Utc::now() + chrono::Duration::milliseconds(ms))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 #[cfg(test)]
@@ -818,21 +1162,68 @@ mod retry_tests {
     #[test]
     fn opencode_runs_every_agent_unless_told_otherwise() {
         let c = choice(&[("PATH", "/bin"), ("DISPATCH_POLL_MS", "10")]);
-        assert_eq!((c.of("mentor"), c.of("any-agent"), c.used()), ("opencode", "opencode", BTreeSet::from(["opencode"])));
+        assert_eq!(
+            (c.of("mentor"), c.of("any-agent"), c.used()),
+            ("opencode", "opencode", BTreeSet::from(["opencode"]))
+        );
     }
 
     #[test]
     fn the_default_and_the_per_agent_override_pick_the_backend() {
-        let c = choice(&[("DISPATCH_BACKEND", "claude"), ("DISPATCH_BACKEND_ORCHESTRATOR", "opencode"), ("DISPATCH_BACKEND_CODE_REVIEWER", " claude ")]);
-        assert_eq!((c.of("mentor"), c.of("orchestrator"), c.of("code-reviewer")), ("claude", "opencode", "claude"));
+        let c = choice(&[
+            ("DISPATCH_BACKEND", "claude"),
+            ("DISPATCH_BACKEND_ORCHESTRATOR", "opencode"),
+            ("DISPATCH_BACKEND_CODE_REVIEWER", " claude "),
+        ]);
+        assert_eq!(
+            (c.of("mentor"), c.of("orchestrator"), c.of("code-reviewer")),
+            ("claude", "opencode", "claude")
+        );
         assert_eq!(c.used(), BTreeSet::from(["opencode", "claude"]));
         let only = choice(&[("DISPATCH_BACKEND_CODE_REVIEWER", "claude")]);
-        assert_eq!((only.of("code-reviewer"), only.of("code.reviewer"), only.of("mentor")), ("claude", "claude", "opencode"));
+        assert_eq!(
+            (
+                only.of("code-reviewer"),
+                only.of("code.reviewer"),
+                only.of("mentor")
+            ),
+            ("claude", "claude", "opencode")
+        );
+    }
+
+    #[test]
+    fn explicit_global_opencode_remains_an_override() {
+        let c = choice(&[("DISPATCH_BACKEND", "opencode")]);
+        assert_eq!(c.overrides("mentor"), (None, Some("opencode")));
+    }
+
+    #[test]
+    fn persisted_backend_is_tri_state_and_invalid_fails_closed() {
+        assert_eq!(stored_backend_name(None), Ok(None));
+        assert_eq!(
+            stored_backend_name(Some(r#"{"routing":{"backend":"claude"}}"#)),
+            Ok(Some("claude"))
+        );
+        assert_eq!(
+            stored_backend_name(Some(r#"{"routing":{"backend":"other"}}"#)),
+            Err(())
+        );
+        assert_eq!(stored_backend_name(Some(r#"{"routing":{}}"#)), Err(()));
+        for routing in [r#""claude""#, "null", "[]", "42"] {
+            assert_eq!(
+                stored_backend_name(Some(&format!(r#"{{"routing":{routing}}}"#))),
+                Err(())
+            );
+        }
     }
 
     #[test]
     fn unknown_backends_and_lookalike_variables_are_ignored() {
-        let c = choice(&[("DISPATCH_BACKEND", "gpt"), ("DISPATCH_BACKENDX", "claude"), ("DISPATCH_BACKEND_MENTOR", "")]);
+        let c = choice(&[
+            ("DISPATCH_BACKEND", "gpt"),
+            ("DISPATCH_BACKENDX", "claude"),
+            ("DISPATCH_BACKEND_MENTOR", ""),
+        ]);
         assert_eq!(c, choice(&[]));
     }
 
@@ -853,7 +1244,12 @@ mod retry_tests {
 fn status_message_id(t: &TaskRow) -> String {
     serde_json::from_str::<Value>(t.status_message.as_deref().unwrap_or("{}"))
         .ok()
-        .and_then(|m| m["messageId"].as_str().filter(|s| !s.is_empty()).map(String::from))
+        .and_then(|m| {
+            m["messageId"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
         .unwrap_or_else(|| t.updated_at.clone())
 }
 
@@ -861,23 +1257,40 @@ fn status_text(t: &TaskRow) -> String {
     serde_json::from_str::<Value>(t.status_message.as_deref().unwrap_or("{}"))
         .ok()
         .and_then(|m| m["parts"].as_array().cloned())
-        .map(|ps| ps.iter().map(|p| p["text"].as_str().unwrap_or("")).collect::<Vec<_>>().join(" "))
+        .map(|ps| {
+            ps.iter()
+                .map(|p| p["text"].as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .unwrap_or_default()
 }
 
 fn nudge_text(kind: &str, t: &TaskRow, style: &backend::Style) -> String {
     let p = style.tool_prefix;
     if kind == "assignee" {
-        let proj = t.directory.as_deref().map(|d| format!(" (project {d})")).unwrap_or_default();
-        let dir = t.directory.as_deref().map(|d| format!(", directory:\"{d}\"")).unwrap_or_default();
+        let proj = t
+            .directory
+            .as_deref()
+            .map(|d| format!(" (project {d})"))
+            .unwrap_or_default();
+        let dir = t
+            .directory
+            .as_deref()
+            .map(|d| format!(", directory:\"{d}\""))
+            .unwrap_or_default();
         return format!(
             "A2A: you are agent \"{to}\". Task {id} is waiting for you{proj}. Call {p}inbox {{agent:\"{to}\"{dir}}}, claim the task with {p}update_task state \"working\", do the work, then finish with {p}update_task state completed | input-required | failed and put the deliverable in an artifact.{note}",
-            to = t.to_agent, id = t.id, note = style.assignee_note
+            to = t.to_agent,
+            id = t.id,
+            note = style.assignee_note
         );
     }
     format!(
         "A2A: task {id} that you sent to \"{to}\" is now {state}. Call {p}get_task {{id:\"{id}\"}}, judge the result, then continue your plan, answer the question with {p}send_message {{taskId}}, or ask the user if it needs their decision.",
-        id = t.id, to = t.to_agent, state = t.state
+        id = t.id,
+        to = t.to_agent,
+        state = t.state
     )
 }
 
@@ -907,12 +1320,26 @@ fn unregister_self() {
 
 /// Live registered dispatchers as (pid, version); entries of dead processes are removed.
 pub fn registered() -> Vec<(u32, String)> {
-    let Ok(rd) = std::fs::read_dir(registry_dir()) else { return vec![] };
+    let Ok(rd) = std::fs::read_dir(registry_dir()) else {
+        return vec![];
+    };
     let mut out = vec![];
     for entry in rd.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
         if pid_is_dispatcher(pid) {
-            out.push((pid, std::fs::read_to_string(entry.path()).unwrap_or_default().trim().to_string()));
+            out.push((
+                pid,
+                std::fs::read_to_string(entry.path())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            ));
         } else {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -922,8 +1349,18 @@ pub fn registered() -> Vec<(u32, String)> {
 
 /// "1.3.0" -> (1,3,0); anything unparsable sorts as the oldest.
 fn version_key(v: &str) -> (u64, u64, u64) {
-    let mut it = v.trim().split('.').map(|p| p.split(['-', '+']).next().unwrap_or("").parse::<u64>().unwrap_or(0));
-    (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
+    let mut it = v.trim().split('.').map(|p| {
+        p.split(['-', '+'])
+            .next()
+            .unwrap_or("")
+            .parse::<u64>()
+            .unwrap_or(0)
+    });
+    (
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+    )
 }
 
 /// True when `v` is a known version older than `than` (unknown/empty counts as older: only
@@ -949,7 +1386,9 @@ fn terminate(pid: u32, wait_ms: u64) -> bool {
 /// name. Only done for the default database: a sandbox (A2A_DB set) must never touch other processes.
 pub fn sweep_unregistered() {
     if std::env::var_os("A2A_DB").is_none() {
-        let _ = std::process::Command::new("pkill").args(["-f", "codetypera2a dispatcher"]).status();
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "codetypera2a dispatcher"])
+            .status();
     }
 }
 
@@ -1001,14 +1440,23 @@ pub fn ensure_running() -> Result<Option<u32>, String> {
     let _ = std::fs::remove_file(stopped_marker()); // an explicit start
     let pid_file = paths::dispatcher_pid_path();
     let regs = registered();
-    let Some(pid) = sys::dispatcher_pid(&pid_file) else { return start_dispatcher() };
-    let ver = regs.iter().find(|(p, _)| *p == pid).map(|(_, v)| v.as_str()).unwrap_or("");
+    let Some(pid) = sys::dispatcher_pid(&pid_file) else {
+        return start_dispatcher();
+    };
+    let ver = regs
+        .iter()
+        .find(|(p, _)| *p == pid)
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("");
     if !is_older(ver, VERSION) {
         // current (or newer than this binary: never replace it) -> keep it, end any duplicates
         terminate_all(regs.iter().map(|(p, _)| *p).filter(|p| *p != pid));
         return Ok(None);
     }
-    log(&format!("replacing dispatcher pid {pid} (version {}) with {VERSION}", ["unknown", ver][usize::from(!ver.is_empty())]));
+    log(&format!(
+        "replacing dispatcher pid {pid} (version {}) with {VERSION}",
+        ["unknown", ver][usize::from(!ver.is_empty())]
+    ));
     terminate(pid, 3000);
     let _ = std::fs::remove_file(&pid_file);
     // an unregistered one is an old build: its siblings are old too
@@ -1021,8 +1469,14 @@ fn start_dispatcher() -> Result<Option<u32>, String> {
     terminate_all(registered().into_iter().map(|(p, _)| p));
     let exe = std::env::current_exe().map_err(e)?;
     // the `oc` name only knows `dispatch`; anything else would be handed to opencode as a folder
-    let sub = if exe.file_name().is_some_and(|n| n == "oc") { "dispatch" } else { "dispatcher" };
-    sys::spawn_detached(&exe, &[sub], &log_path()).map(Some).map_err(e)
+    let sub = if exe.file_name().is_some_and(|n| n == "oc") {
+        "dispatch"
+    } else {
+        "dispatcher"
+    };
+    sys::spawn_detached(&exe, &[sub], &log_path())
+        .map(Some)
+        .map_err(e)
 }
 
 pub fn log_path() -> PathBuf {
@@ -1041,51 +1495,139 @@ pub fn ensure_status_window() -> Result<sys::Tab, String> {
     let exe = std::env::current_exe().map_err(e)?;
     // Run through the `oc` symlink, current_exe is `oc` and the `oc` subcommand would be handed
     // to opencode (which fails, closes the window and gets it reopened forever).
-    let watch = if exe.file_name().is_some_and(|n| n == "oc") { "watch" } else { "oc watch" };
-    let cmd = format!("A2A_STATUS_WINDOW=1 A2A_NO_DISPATCHER=1 {} {watch}", sys::sh(&exe.display().to_string()));
+    let watch = if exe.file_name().is_some_and(|n| n == "oc") {
+        "watch"
+    } else {
+        "oc watch"
+    };
+    let cmd = format!(
+        "A2A_STATUS_WINDOW=1 A2A_NO_DISPATCHER=1 {} {watch}",
+        sys::sh(&exe.display().to_string())
+    );
     sys::tmux_ensure_window("a2a-status", &cmd)
 }
 
 pub fn run() -> i32 {
-    let cfg = Cfg::from_env();
+    let mut cfg = Cfg::from_env();
+    let mut migration_guard = if std::env::var_os("A2A_DB").is_none() {
+        let home = paths::runtime_home();
+        let lock = paths::migration_lock_path(&home);
+        if let Some(parent) = lock.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                eprintln!("dispatcher: migration lock parent: {err}");
+                return 1;
+            }
+        }
+        let file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                eprintln!("dispatcher: migration lock unavailable: {err}");
+                return 1;
+            }
+        };
+        if let Err(err) = paths::ensure_private_file(&lock) {
+            let _ = std::fs::remove_file(&lock);
+            eprintln!("dispatcher: migration lock permissions: {err}");
+            return 1;
+        }
+        if let Err(err) = paths::migrate_legacy_locked(&home, &paths::legacy_home()) {
+            drop(file);
+            let _ = std::fs::remove_file(&lock);
+            eprintln!("dispatcher: legacy migration: {err}");
+            return 1;
+        }
+        Some((file, lock))
+    } else {
+        None
+    };
+    // All dispatcher runtime paths are derived from the home whose migration lock we held.
+    // A live legacy owner has already returned above, so startup can never mix homes.
+    let owner = paths::resolve_runtime_home(&paths::runtime_home(), &paths::legacy_home());
+    cfg.pid_file = paths::runtime_paths(&owner).pid;
     let pid_file = cfg.pid_file.clone();
     match acquire_lock(&pid_file) {
         Ok(Lock::Held) => {}
         Ok(Lock::Other(pid)) => {
-            log(&format!("another dispatcher is already running (pid {pid}, {}); exiting", pid_file.display()));
+            if let Some((file, lock)) = migration_guard.take() {
+                drop(file);
+                let _ = std::fs::remove_file(lock);
+            }
+            log(&format!(
+                "another dispatcher is already running (pid {pid}, {}); exiting",
+                pid_file.display()
+            ));
             return 0;
         }
         Err(err) => {
+            if let Some((file, lock)) = migration_guard.take() {
+                drop(file);
+                let _ = std::fs::remove_file(lock);
+            }
             eprintln!("dispatcher: {err}");
             return 1;
         }
     }
     register_self();
     let pf = pid_file.clone();
+    let migration_lock = migration_guard.as_ref().map(|(_, lock)| lock.clone());
     let _ = ctrlc::set_handler(move || {
         release_lock(&pf);
+        if let Some(lock) = &migration_lock {
+            let _ = std::fs::remove_file(lock);
+        }
         std::process::exit(0);
     });
     let db_path = paths::db_path();
-    let conn = match db::open(&db_path) {
+    let conn = match if migration_guard.is_some() {
+        db::open_after_migration(&db_path)
+    } else {
+        db::open(&db_path)
+    } {
         Ok(c) => c,
         Err(err) => {
             eprintln!("dispatcher: {err}");
             release_lock(&pid_file);
+            if let Some((file, lock)) = migration_guard.take() {
+                drop(file);
+                let _ = std::fs::remove_file(lock);
+            }
             return 1;
         }
     };
-    let backends = backend::build(&cfg.choice.used());
-    let mut d = Dispatcher { conn, cfg, active: (None, HashSet::new()), backends };
+    // Persisted context routing may outlive environment overrides; keep both runtimes available so
+    // retries never switch or fail merely because DISPATCH_BACKEND changed.
+    let names: BTreeSet<&'static str> = backend::NAMES
+        .into_iter()
+        .chain(cfg.choice.used())
+        .collect();
+    let backends = backend::build(&names);
+    let mut d = Dispatcher {
+        conn,
+        cfg,
+        active: (None, HashSet::new()),
+        backends,
+    };
     log(&format!(
         "dispatcher up: db={} poll={}ms maxHops={} stall={}s agents={}{}",
-        db_path.display(), d.cfg.poll_ms, d.cfg.max_hops, d.cfg.stall_secs, d.cfg.agent_dir.display(),
+        db_path.display(),
+        d.cfg.poll_ms,
+        d.cfg.max_hops,
+        d.cfg.stall_secs,
+        d.cfg.agent_dir.display(),
         if d.cfg.dry { " DRY-RUN" } else { "" }
     ));
     if std::env::var("DISPATCH_NO_BASELINE").as_deref() != Ok("1") {
         if let Err(err) = d.baseline() {
             log(&format!("baseline failed: {err}"));
             release_lock(&pid_file);
+            if let Some((file, lock)) = migration_guard.take() {
+                drop(file);
+                let _ = std::fs::remove_file(lock);
+            }
             return 1;
         }
     }

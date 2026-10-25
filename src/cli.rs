@@ -56,6 +56,12 @@ INIT OPTIONS:
                  (`engram setup opencode`, `codegraph install`); interactive
   --no-models    Skip the screen that sets each agent's model (run `codetypera2a models` later)
   --no-link      Do not create the `oc` symlink next to the binary
+  --no-default-agent  Do not make the orchestrator Claude Code's main agent (`agent` in settings.json;
+                 an agent you already chose is never replaced)
+  --ollama-url <url>  Also look for Ollama models on this host (repeatable, e.g. http://100.99.194.92) and add
+                 them to opencode.jsonc as provider ollama-<host>; remembered in <dir>/a2a/ollama.json.
+                 The local Ollama (127.0.0.1:11434) and $OLLAMA_HOST are always checked
+  --no-ollama    Skip the Ollama discovery
   --force        Overwrite files that already exist and replace the a2a MCP entry
   --md-only      Refresh only the agent/command/PROTOCOL markdown (keeps opencode.jsonc, MCP entries,
                  plugin and models; saved models are put back into the agent files). Also: `update`
@@ -79,7 +85,10 @@ pub fn help() -> i32 {
 
 fn config_dir(args: &[String]) -> Result<PathBuf, String> {
     match args.iter().position(|a| a == "--dir") {
-        Some(i) => args.get(i + 1).map(PathBuf::from).ok_or_else(|| "--dir needs a path".to_string()),
+        Some(i) => args
+            .get(i + 1)
+            .map(PathBuf::from)
+            .ok_or_else(|| "--dir needs a path".to_string()),
         None => Ok(crate::paths::config_dir()),
     }
 }
@@ -98,9 +107,11 @@ pub(crate) fn install(target: &Path, contents: &[u8], force: bool) -> Result<boo
         return Ok(false);
     }
     if let Some(dir) = target.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    std::fs::write(target, contents).map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+    std::fs::write(target, contents)
+        .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     Ok(true)
 }
 
@@ -110,7 +121,11 @@ pub(crate) fn stable_exe() -> PathBuf {
     let invoked = std::env::args_os().next().map(PathBuf::from);
     let abs = invoked.and_then(|p| {
         if p.components().count() > 1 {
-            if p.is_absolute() { Some(p) } else { std::env::current_dir().ok().map(|d| d.join(p)) }
+            if p.is_absolute() {
+                Some(p)
+            } else {
+                std::env::current_dir().ok().map(|d| d.join(p))
+            }
         } else {
             which(&p.to_string_lossy())
         }
@@ -122,31 +137,55 @@ pub(crate) fn stable_exe() -> PathBuf {
 
 /// First `name` found on PATH.
 pub(crate) fn which(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(name)).find(|p| p.is_file())
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
 }
 
 /// The other MCP servers the setup expects next to `a2a` (opencode v2 shape). Only added when
 /// missing; local commands are resolved on PATH so a Homebrew or cargo install both work.
 pub(crate) fn default_mcp_servers() -> Vec<(&'static str, serde_json::Value)> {
     use serde_json::json;
-    let bin = |name: &str| which(name).map(|p| p.display().to_string()).unwrap_or_else(|| name.to_string());
+    let bin = |name: &str| {
+        which(name)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| name.to_string())
+    };
     vec![
-        ("codegraph", json!({ "type": "local", "command": ["codegraph", "serve", "--mcp"], "codemode": false })),
-        ("context7", json!({ "type": "remote", "url": "https://mcp.context7.com/mcp" })),
-        ("engram", json!({ "type": "local", "command": [bin("engram"), "mcp", "--tools=agent"] })),
-        ("playwright", json!({ "type": "local", "command": ["npx", "-y", "@playwright/mcp@latest"] })),
+        (
+            "codegraph",
+            json!({ "type": "local", "command": ["codegraph", "serve", "--mcp"], "codemode": false }),
+        ),
+        (
+            "context7",
+            json!({ "type": "remote", "url": "https://mcp.context7.com/mcp" }),
+        ),
+        (
+            "engram",
+            json!({ "type": "local", "command": [bin("engram"), "mcp", "--tools=agent"] }),
+        ),
+        (
+            "playwright",
+            json!({ "type": "local", "command": ["npx", "-y", "@playwright/mcp@latest"] }),
+        ),
     ]
 }
 
 /// Official opencode setup commands of the companion tools (from their READMEs):
 /// engram: https://github.com/Gentleman-Programming/engram, codegraph: https://github.com/colbymchenry/codegraph
-const TOOL_SETUPS: [(&str, &[&str]); 2] = [("engram", &["setup", "opencode"]), ("codegraph", &["install"])];
+const TOOL_SETUPS: [(&str, &[&str]); 2] = [
+    ("engram", &["setup", "opencode"]),
+    ("codegraph", &["install"]),
+];
 
 /// Run each installed tool's own setup (interactive, output shown). Opt-in via `--tools`.
 fn run_tool_setups() {
     for (bin, args) in TOOL_SETUPS {
         let Some(path) = which(bin) else {
-            println!("init: skipping `{bin} {}` ({bin} is not installed, see the steps below)", args.join(" "));
+            println!(
+                "init: skipping `{bin} {}` ({bin} is not installed, see the steps below)",
+                args.join(" ")
+            );
             continue;
         };
         println!("init: running `{bin} {}`", args.join(" "));
@@ -162,13 +201,19 @@ fn run_tool_setups() {
 fn tool_next_steps() -> Vec<String> {
     let mut steps = Vec::new();
     if which("engram").is_none() {
-        steps.push("engram: brew install gentleman-programming/tap/engram && engram setup opencode".to_string());
+        steps.push(
+            "engram: brew install gentleman-programming/tap/engram && engram setup opencode"
+                .to_string(),
+        );
     }
     if which("codegraph").is_none() {
         steps.push("codegraph: curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh   (or: npm i -g @colbymchenry/codegraph), then `codegraph install`".to_string());
     }
     steps.push("codegraph: run `codegraph init` once in each project you want indexed".to_string());
-    steps.push("context7: works as configured; for an API key + skill run `npx ctx7 setup --opencode`".to_string());
+    steps.push(
+        "context7: works as configured; for an API key + skill run `npx ctx7 setup --opencode`"
+            .to_string(),
+    );
     steps
 }
 
@@ -192,12 +237,19 @@ pub fn heal(root: &Path, exe: &Path) -> Option<String> {
     if let Ok(text) = std::fs::read_to_string(&cfg_path) {
         match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(mut cfg) => {
-                let old = cfg.pointer_mut("/mcp/servers/a2a").and_then(|s| repair_command(s, exe));
+                let old = cfg
+                    .pointer_mut("/mcp/servers/a2a")
+                    .and_then(|s| repair_command(s, exe));
                 if let Some(old) = old {
                     let bak = root.join("opencode.jsonc.bak-a2a");
                     let out = serde_json::to_string_pretty(&cfg).ok()?;
-                    if std::fs::copy(&cfg_path, &bak).is_ok() && std::fs::write(&cfg_path, out + "\n").is_ok() {
-                        msgs.push(format!("mcp server a2a path repaired ({old} -> {})", exe.display()));
+                    if std::fs::copy(&cfg_path, &bak).is_ok()
+                        && std::fs::write(&cfg_path, out + "\n").is_ok()
+                    {
+                        msgs.push(format!(
+                            "mcp server a2a path repaired ({old} -> {})",
+                            exe.display()
+                        ));
                     }
                 }
             }
@@ -215,11 +267,21 @@ pub fn heal(root: &Path, exe: &Path) -> Option<String> {
     let path_file = root.join("a2a").join("codetypera2a.path");
     if let Ok(recorded) = std::fs::read_to_string(&path_file) {
         let recorded = recorded.trim();
-        if !recorded.is_empty() && !Path::new(recorded).exists() && std::fs::write(&path_file, exe.display().to_string()).is_ok() {
-            msgs.push(format!("codetypera2a.path repaired ({recorded} -> {})", exe.display()));
+        if !recorded.is_empty()
+            && !Path::new(recorded).exists()
+            && std::fs::write(&path_file, exe.display().to_string()).is_ok()
+        {
+            msgs.push(format!(
+                "codetypera2a.path repaired ({recorded} -> {})",
+                exe.display()
+            ));
         }
     }
-    if msgs.is_empty() { None } else { Some(msgs.join("; ")) }
+    if msgs.is_empty() {
+        None
+    } else {
+        Some(msgs.join("; "))
+    }
 }
 
 /// Crude scan of commented JSONC: any quoted absolute path ending in `codetypera2a` that is gone.
@@ -244,7 +306,8 @@ fn register_mcp(root: &Path, exe: &Path, force: bool) -> Result<String, String> 
         "codemode": false,
     });
     let mut cfg: Value = if path.exists() {
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         match serde_json::from_str(&text) {
             Ok(v) => v,
             Err(_) => {
@@ -259,7 +322,9 @@ fn register_mcp(root: &Path, exe: &Path, force: bool) -> Result<String, String> 
         json!({ "$schema": "https://opencode.ai/config.json" })
     };
     let before = cfg.clone();
-    let obj = cfg.as_object_mut().ok_or("opencode.jsonc is not a JSON object")?;
+    let obj = cfg
+        .as_object_mut()
+        .ok_or("opencode.jsonc is not a JSON object")?;
     // v1-style entries directly under `mcp` count as already configured.
     let legacy: Vec<String> = obj
         .get("mcp")
@@ -278,8 +343,13 @@ fn register_mcp(root: &Path, exe: &Path, force: bool) -> Result<String, String> 
     let mut notes = Vec::new();
     if servers.contains_key("a2a") && !force {
         match servers.get_mut("a2a").and_then(|s| repair_command(s, exe)) {
-            Some(old) => notes.push(format!("mcp server a2a path repaired ({old} -> {})", exe.display())),
-            None => notes.push("mcp server a2a already registered (use --force to replace)".to_string()),
+            Some(old) => notes.push(format!(
+                "mcp server a2a path repaired ({old} -> {})",
+                exe.display()
+            )),
+            None => {
+                notes.push("mcp server a2a already registered (use --force to replace)".to_string())
+            }
         }
     } else {
         servers.insert("a2a".into(), entry);
@@ -303,10 +373,16 @@ fn register_mcp(root: &Path, exe: &Path, force: bool) -> Result<String, String> 
         notes.push(format!("mcp servers added: {}", added.join(", ")));
     }
     if !missing_bins.is_empty() {
-        notes.push(format!("not found on PATH (install them to connect): {}", missing_bins.join(", ")));
+        notes.push(format!(
+            "not found on PATH (install them to connect): {}",
+            missing_bins.join(", ")
+        ));
     }
     // The orchestrator is the agent you talk to, so opencode opens on it.
-    let prev = obj.get("default_agent").and_then(Value::as_str).map(String::from);
+    let prev = obj
+        .get("default_agent")
+        .and_then(Value::as_str)
+        .map(String::from);
     if prev.as_deref() != Some("orchestrator") {
         obj.insert("default_agent".into(), json!("orchestrator"));
         notes.push(match prev {
@@ -318,10 +394,12 @@ fn register_mcp(root: &Path, exe: &Path, force: bool) -> Result<String, String> 
     if !unchanged {
         if path.exists() {
             let bak = root.join("opencode.jsonc.bak-a2a");
-            std::fs::copy(&path, &bak).map_err(|e| format!("cannot back up {}: {e}", path.display()))?;
+            std::fs::copy(&path, &bak)
+                .map_err(|e| format!("cannot back up {}: {e}", path.display()))?;
         }
         let out = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-        std::fs::write(&path, out + "\n").map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        std::fs::write(&path, out + "\n")
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     }
     Ok(notes.join("; "))
 }
@@ -348,28 +426,39 @@ fn append_alias(rc: &Path) -> Result<bool, String> {
 
 /// The rc file of the user's login shell (zsh or bash).
 fn shell_rc() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or("HOME is not set")?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set")?;
     let shell = std::env::var("SHELL").unwrap_or_default();
     if shell.ends_with("zsh") {
-        let dir = std::env::var_os("ZDOTDIR").map(PathBuf::from).unwrap_or(home);
+        let dir = std::env::var_os("ZDOTDIR")
+            .map(PathBuf::from)
+            .unwrap_or(home);
         Ok(dir.join(".zshrc"))
     } else if shell.ends_with("bash") {
         Ok(home.join(".bashrc"))
     } else {
-        Err(format!("unsupported shell {shell:?}; add this yourself: alias opencode='oc'"))
+        Err(format!(
+            "unsupported shell {shell:?}; add this yourself: alias opencode='oc'"
+        ))
     }
 }
 
 /// Put an `oc` symlink next to the binary so `oc` works from the shell.
 fn link_oc(exe: &Path) -> String {
-    let Some(dir) = exe.parent() else { return "oc link skipped".into() };
+    let Some(dir) = exe.parent() else {
+        return "oc link skipped".into();
+    };
     let link = dir.join("oc");
     if link.exists() || link.symlink_metadata().is_ok() {
         return format!("oc already present at {}", link.display());
     }
     match std::os::unix::fs::symlink(exe, &link) {
         Ok(()) => format!("oc -> {} linked at {}", exe.display(), link.display()),
-        Err(e) => format!("could not link oc ({e}); run: ln -s {} <dir-on-PATH>/oc", exe.display()),
+        Err(e) => format!(
+            "could not link oc ({e}); run: ln -s {} <dir-on-PATH>/oc",
+            exe.display()
+        ),
     }
 }
 
@@ -379,7 +468,10 @@ pub fn init(args: &[String]) -> i32 {
     use std::io::IsTerminal;
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let probe = targets::Probe::system();
-    let ids = match targets::plan(&targets::Flags::from_args(args, tty), &targets::detected(&probe)) {
+    let ids = match targets::plan(
+        &targets::Flags::from_args(args, tty),
+        &targets::detected(&probe),
+    ) {
         Plan::Run(ids) => ids,
         Plan::Ask => match picker::pick(&probe) {
             Ok(Some(ids)) => ids,
@@ -399,7 +491,11 @@ pub fn init(args: &[String]) -> i32 {
     }
     type Setup = fn(&[String]) -> i32;
     let runs: [(Id, Setup); 2] = [(Id::Opencode, init_opencode), (Id::Claude, init_claude)];
-    runs.iter().filter(|(id, _)| ids.contains(id)).map(|(_, run)| run(args)).max().unwrap_or(0)
+    runs.iter()
+        .filter(|(id, _)| ids.contains(id))
+        .map(|(_, run)| run(args))
+        .max()
+        .unwrap_or(0)
 }
 
 /// The Claude Code half of `init`: converted agents and commands, plus the MCP servers.
@@ -412,7 +508,11 @@ fn init_claude(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let opts = claude::Opts { force: args.iter().any(|a| a == "--force"), md_only: args.iter().any(|a| a == "--md-only") };
+    let opts = claude::Opts {
+        force: args.iter().any(|a| a == "--force"),
+        md_only: args.iter().any(|a| a == "--md-only"),
+        default_agent: !args.iter().any(|a| a == "--no-default-agent"),
+    };
     match claude::run(&dirs, &stable_exe(), &opts, &claude::real_runner(&dirs)) {
         Ok(lines) => lines.iter().for_each(|l| println!("init: claude: {l}")),
         Err(e) => {
@@ -420,12 +520,26 @@ fn init_claude(args: &[String]) -> i32 {
             return 1;
         }
     }
-    let custom_dir = args.iter().any(|a| a == "--claude-dir") && std::env::var_os("CLAUDE_CONFIG_DIR").is_none();
+    let custom_dir =
+        args.iter().any(|a| a == "--claude-dir") && std::env::var_os("CLAUDE_CONFIG_DIR").is_none();
     if custom_dir {
-        println!("init: claude: Claude Code only reads {} when you start it with CLAUDE_CONFIG_DIR={}", dirs.root.display(), dirs.root.display());
+        println!(
+            "init: claude: Claude Code only reads {} when you start it with CLAUDE_CONFIG_DIR={}",
+            dirs.root.display(),
+            dirs.root.display()
+        );
     }
-    println!("init: claude: restart Claude Code; talk to an agent with `claude --agent orchestrator`; commands: /plan-new, /plan-continue, /plan-status");
-    println!("init: claude: the dispatcher does not wake Claude Code sessions yet, so agents that wait for another agent's result need opencode for now");
+    let start = if opts.default_agent {
+        "Claude Code starts on the orchestrator (`claude --agent <name>` picks another)"
+    } else {
+        "talk to an agent with `claude --agent orchestrator`"
+    };
+    println!(
+        "init: claude: restart Claude Code; {start}; commands: /plan-new, /plan-continue, /plan-status"
+    );
+    println!(
+        "init: claude: the dispatcher does not wake Claude Code sessions yet, so agents that wait for another agent's result need opencode for now"
+    );
     0
 }
 
@@ -442,27 +556,47 @@ fn init_opencode(args: &[String]) -> i32 {
     let exe = stable_exe();
     // The opencode plugin reads this to find the binary (it may not be on opencode's PATH).
     let path_file = root.join("a2a").join("codetypera2a.path");
-    if let Err(e) = std::fs::create_dir_all(root.join("a2a")).and_then(|_| (!md_only).then(|| std::fs::write(&path_file, exe.display().to_string())).unwrap_or(Ok(()))) {
+    if let Err(e) = std::fs::create_dir_all(root.join("a2a")).and_then(|_| {
+        (!md_only)
+            .then(|| std::fs::write(&path_file, exe.display().to_string()))
+            .unwrap_or(Ok(()))
+    }) {
         eprintln!("init: cannot write {}: {e}", path_file.display());
     }
     let mut items: Vec<(PathBuf, &[u8])> = AGENTS
         .files()
-        .filter_map(|f| Some((root.join("agents").join(f.path().file_name()?), f.contents())))
+        .filter_map(|f| {
+            Some((
+                root.join("agents").join(f.path().file_name()?),
+                f.contents(),
+            ))
+        })
         .collect();
-    items.extend(
-        COMMANDS
-            .files()
-            .filter_map(|f| Some((root.join("commands").join(f.path().file_name()?), f.contents()))),
-    );
+    items.extend(COMMANDS.files().filter_map(|f| {
+        Some((
+            root.join("commands").join(f.path().file_name()?),
+            f.contents(),
+        ))
+    }));
     let mut plugin_files = Vec::new();
     embedded_files(&PLUGINS, &mut plugin_files);
     plugin_files.retain(|(rel, _)| !rel.starts_with(CLAUDE_MOD_DIR));
-    items.extend(plugin_files.into_iter().map(|(rel, bytes)| (root.join("plugins").join(rel), bytes)));
-    items.push((root.join("a2a").join("model-policy.json"), POLICY.as_bytes()));
+    items.extend(
+        plugin_files
+            .into_iter()
+            .map(|(rel, bytes)| (root.join("plugins").join(rel), bytes)),
+    );
+    items.push((
+        root.join("a2a").join("model-policy.json"),
+        POLICY.as_bytes(),
+    ));
     items.push((root.join("a2a").join("PROTOCOL.md"), PROTOCOL.as_bytes()));
     if md_only {
         let docs = [root.join("agents"), root.join("commands")];
-        items.retain(|(t, _)| t.extension().is_some_and(|e| e == "md") && (docs.iter().any(|d| t.starts_with(d)) || t.ends_with("PROTOCOL.md")));
+        items.retain(|(t, _)| {
+            t.extension().is_some_and(|e| e == "md")
+                && (docs.iter().any(|d| t.starts_with(d)) || t.ends_with("PROTOCOL.md"))
+        });
     }
     let (mut written, mut skipped) = (0, 0);
     for (target, contents) in items {
@@ -475,11 +609,18 @@ fn init_opencode(args: &[String]) -> i32 {
             }
         }
     }
-    println!("init: {written} file(s) installed, {skipped} skipped (exist; use --force) -> {}", root.display());
+    println!(
+        "init: {written} file(s) installed, {skipped} skipped (exist; use --force) -> {}",
+        root.display()
+    );
     if md_only {
         // the files carry the template models again: put back the ones saved in opencode.jsonc
-        let kept = crate::models::load_config(&root).map_or(0, |(cfg, _)| crate::models::sync_agent_files(&root, &crate::models::current_models(&cfg)));
-        println!("init: --md-only: only markdown refreshed; {kept} agent file(s) set back to the models saved in opencode.jsonc");
+        let kept = crate::models::load_config(&root).map_or(0, |(cfg, _)| {
+            crate::models::sync_agent_files(&root, &crate::models::current_models(&cfg))
+        });
+        println!(
+            "init: --md-only: only markdown refreshed; {kept} agent file(s) set back to the models saved in opencode.jsonc"
+        );
         return 0;
     }
     if args.iter().any(|a| a == "--tools") {
@@ -492,6 +633,9 @@ fn init_opencode(args: &[String]) -> i32 {
             return 1;
         }
     }
+    crate::ollama::setup(&root, args)
+        .iter()
+        .for_each(|l| println!("init: {l}"));
     if !args.iter().any(|a| a == "--no-link") {
         println!("init: {}", link_oc(&exe));
     }
@@ -516,14 +660,22 @@ fn init_opencode(args: &[String]) -> i32 {
     }
     if args.iter().any(|a| a == "--shell") {
         match shell_rc().and_then(|rc| append_alias(&rc).map(|new| (rc, new))) {
-            Ok((rc, true)) => println!("init: alias opencode='oc' added to {} (open a new terminal or: source {})", rc.display(), rc.display()),
+            Ok((rc, true)) => println!(
+                "init: alias opencode='oc' added to {} (open a new terminal or: source {})",
+                rc.display(),
+                rc.display()
+            ),
             Ok((rc, false)) => println!("init: alias already present in {}", rc.display()),
             Err(e) => eprintln!("init: {e}"),
         }
     } else {
-        println!("init: tip: run `codetypera2a init --shell` so typing `opencode` runs `oc` (optional: the opencode plugin already starts the dispatcher and, in tmux, the status tab)");
+        println!(
+            "init: tip: run `codetypera2a init --shell` so typing `opencode` runs `oc` (optional: the opencode plugin already starts the dispatcher and, in tmux, the status tab)"
+        );
     }
-    println!("init: restart opencode (or run `opencode reload`); it opens on the orchestrator and the a2a MCP server starts the dispatcher by itself. `oc` is optional.");
+    println!(
+        "init: restart opencode (or run `opencode reload`); it opens on the orchestrator and the a2a MCP server starts the dispatcher by itself. `oc` is optional."
+    );
     0
 }
 
@@ -539,12 +691,19 @@ mod tests {
     }
 
     fn cmd0(dir: &Path) -> String {
-        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
-        cfg["mcp"]["servers"]["a2a"]["command"][0].as_str().unwrap().to_string()
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap())
+                .unwrap();
+        cfg["mcp"]["servers"]["a2a"]["command"][0]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     fn a2a_cfg(cmd: &str) -> String {
-        format!(r#"{{"mcp":{{"servers":{{"a2a":{{"type":"local","command":["{cmd}","hub"],"codemode":false,"x":1}}}}}}}}"#)
+        format!(
+            r#"{{"mcp":{{"servers":{{"a2a":{{"type":"local","command":["{cmd}","hub"],"codemode":false,"x":1}}}}}}}}"#
+        )
     }
 
     #[test]
@@ -553,9 +712,17 @@ mod tests {
         let new = std::env::current_exe().unwrap();
         std::fs::write(dir.join("opencode.jsonc"), a2a_cfg("/gone/codetypera2a")).unwrap();
         let msg = heal(&dir, &new).unwrap();
-        assert!(msg.contains(&format!("path repaired (/gone/codetypera2a -> {})", new.display())), "{msg}");
+        assert!(
+            msg.contains(&format!(
+                "path repaired (/gone/codetypera2a -> {})",
+                new.display()
+            )),
+            "{msg}"
+        );
         assert_eq!(cmd0(&dir), new.display().to_string());
-        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap())
+                .unwrap();
         assert_eq!(cfg["mcp"]["servers"]["a2a"]["x"], 1);
         assert_eq!(cfg["mcp"]["servers"]["a2a"]["codemode"], false);
         assert!(dir.join("opencode.jsonc.bak-a2a").exists());
@@ -582,8 +749,14 @@ mod tests {
         let text = "{\n // mine\n \"mcp\": {\"servers\": {\"a2a\": {\"command\": [\"/gone/codetypera2a\", \"hub\"]}}}\n}";
         std::fs::write(dir.join("opencode.jsonc"), text).unwrap();
         let msg = heal(&dir, Path::new("/new/codetypera2a")).unwrap();
-        assert!(msg.contains("/new/codetypera2a") && !msg.contains('\n'), "{msg}");
-        assert_eq!(std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap(), text);
+        assert!(
+            msg.contains("/new/codetypera2a") && !msg.contains('\n'),
+            "{msg}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap(),
+            text
+        );
         assert!(!dir.join("opencode.jsonc.bak-a2a").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -595,9 +768,16 @@ mod tests {
         let real = std::env::current_exe().unwrap();
         std::fs::write(&pf, real.display().to_string()).unwrap();
         assert!(heal(&dir, Path::new("/new/codetypera2a")).is_none());
-        assert_eq!(std::fs::read_to_string(&pf).unwrap(), real.display().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&pf).unwrap(),
+            real.display().to_string()
+        );
         std::fs::write(&pf, "/gone/codetypera2a").unwrap();
-        assert!(heal(&dir, Path::new("/new/codetypera2a")).unwrap().contains("codetypera2a.path repaired"));
+        assert!(
+            heal(&dir, Path::new("/new/codetypera2a"))
+                .unwrap()
+                .contains("codetypera2a.path repaired")
+        );
         assert_eq!(std::fs::read_to_string(&pf).unwrap(), "/new/codetypera2a");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -608,7 +788,13 @@ mod tests {
         let new = std::env::current_exe().unwrap();
         std::fs::write(dir.join("opencode.jsonc"), a2a_cfg("/gone/codetypera2a")).unwrap();
         let note = register_mcp(&dir, &new, false).unwrap();
-        assert!(note.contains(&format!("path repaired (/gone/codetypera2a -> {})", new.display())), "{note}");
+        assert!(
+            note.contains(&format!(
+                "path repaired (/gone/codetypera2a -> {})",
+                new.display()
+            )),
+            "{note}"
+        );
         assert_eq!(cmd0(&dir), new.display().to_string());
         let note = register_mcp(&dir, Path::new("/other/codetypera2a"), false).unwrap();
         assert!(note.contains("already registered"), "{note}");
@@ -627,9 +813,13 @@ mod tests {
         .unwrap();
         register_mcp(&dir, Path::new("/x/codetypera2a"), false).unwrap();
         let cfg: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap())
+                .unwrap();
         assert_eq!(cfg["mcp"]["servers"]["engram"]["command"][0], "/my/engram");
-        assert!(cfg["mcp"]["servers"]["playwright"].is_null(), "legacy top-level entry must count as present");
+        assert!(
+            cfg["mcp"]["servers"]["playwright"].is_null(),
+            "legacy top-level entry must count as present"
+        );
         assert!(cfg["mcp"]["servers"]["codegraph"].is_object());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -655,7 +845,13 @@ mod tests {
             r#"{"model":"x/y","mcp":{"servers":{"other":{"type":"local","command":["o"]}}}}"#,
         )
         .unwrap();
-        let a = vec!["--opencode".to_string(), "--dir".to_string(), dir.display().to_string(), "--no-link".to_string(), "--no-models".to_string()];
+        let a = vec![
+            "--opencode".to_string(),
+            "--dir".to_string(),
+            dir.display().to_string(),
+            "--no-link".to_string(),
+            "--no-models".to_string(),
+        ];
         assert_eq!(init(&a), 0);
         let f = dir.join("agents/orchestrator.md");
         assert!(f.exists());
@@ -663,10 +859,14 @@ mod tests {
         assert!(dir.join("a2a/PROTOCOL.md").exists());
         assert!(dir.join("commands/plan-new.md").exists());
         assert!(dir.join("plugins/a2a/tui.ts").exists());
-        assert!(dir.join("plugins/a2a/panels.tsx").exists() && dir.join("plugins/a2a/panel-logic.ts").exists());
+        assert!(
+            dir.join("plugins/a2a/panels.tsx").exists()
+                && dir.join("plugins/a2a/panel-logic.ts").exists()
+        );
         assert!(dir.join("a2a/codetypera2a.path").exists());
         let cfg: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap())
+                .unwrap();
         assert_eq!(cfg["model"], "x/y");
         assert_eq!(cfg["mcp"]["servers"]["other"]["command"][0], "o");
         assert_eq!(cfg["mcp"]["servers"]["a2a"]["command"][1], "hub");
@@ -703,21 +903,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (claude_dir, opencode_dir) = (dir.join("claude"), dir.join("opencode"));
-        let a = vec!["--claude".to_string(), "--claude-dir".to_string(), claude_dir.display().to_string(), "--dir".to_string(), opencode_dir.display().to_string()];
+        let a = vec![
+            "--claude".to_string(),
+            "--claude-dir".to_string(),
+            claude_dir.display().to_string(),
+            "--dir".to_string(),
+            opencode_dir.display().to_string(),
+        ];
         assert_eq!(init(&a), 0);
         assert!(claude_dir.join("agents/orchestrator.md").exists());
         assert!(claude_dir.join("commands/plan-new.md").exists());
-        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap()).unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(cfg["mcpServers"]["a2a"]["args"][0], "hub");
         assert_eq!(cfg["mcpServers"]["a2a"]["type"], "stdio");
         for name in ["codegraph", "context7", "engram", "playwright"] {
             assert!(cfg["mcpServers"][name].is_object(), "{name} missing");
         }
-        assert!(!opencode_dir.exists(), "--claude must not touch the opencode dir");
+        assert!(
+            !opencode_dir.exists(),
+            "--claude must not touch the opencode dir"
+        );
         // a second run keeps what is there
         let before = std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap();
         assert_eq!(init(&a), 0);
-        assert_eq!(std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(claude_dir.join(".claude.json")).unwrap(),
+            before
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

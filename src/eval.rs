@@ -271,8 +271,10 @@ fn round_trip(dispatchers: usize) -> Result<(Sandbox, String), String> {
 fn nudge_kinds(sb: &Sandbox) -> Result<(i64, i64, i64), String> {
     let total = sb.count("SELECT COUNT(*) FROM nudges")?;
     let distinct = sb.count("SELECT COUNT(DISTINCT key) FROM nudges")?;
-    let assignee = sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'assignee' AND status = 'delivered'")?;
-    let requester = sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'requester' AND status = 'delivered'")?;
+    let assignee =
+        sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'assignee' AND status = 'delivered'")?;
+    let requester =
+        sb.count("SELECT COUNT(*) FROM nudges WHERE kind = 'requester' AND status = 'delivered'")?;
     if total != distinct {
         return Err(format!(
             "duplicate nudge keys: {total} rows, {distinct} distinct"

@@ -15,7 +15,7 @@ fn opt(args: &[String], name: &str, def: PathBuf) -> PathBuf {
 }
 
 pub fn run(args: &[String]) -> i32 {
-        let config_path = opt(args, "--config", guard::config_path());
+    let config_path = opt(args, "--config", guard::config_path());
     let policy_path = opt(args, "--policy", guard::policy_path());
     let agents_dir = opt(args, "--agents", crate::paths::agent_dir());
     let strict = args.iter().any(|a| a == "--strict");
@@ -58,7 +58,11 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     let mut table: BTreeMap<String, String> = BTreeMap::new();
-    if let Some(agents) = config.get("agents").or_else(|| config.get("agent")).and_then(|a| a.as_object()) {
+    if let Some(agents) = config
+        .get("agents")
+        .or_else(|| config.get("agent"))
+        .and_then(|a| a.as_object())
+    {
         for (name, v) in agents {
             if let Some(m) = v
                 .get("model")

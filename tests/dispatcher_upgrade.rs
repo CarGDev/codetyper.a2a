@@ -12,9 +12,15 @@ struct Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         // whatever a failing assertion left behind
-        let _ = Command::new(env!("CARGO_BIN_EXE_codetypera2a")).args(["oc", "stop"]).envs(self.env()).output();
+        let _ = Command::new(env!("CARGO_BIN_EXE_codetypera2a"))
+            .args(["oc", "stop"])
+            .envs(self.env())
+            .output();
         for pid in &self.fakes {
-            let _ = Command::new("kill").arg(pid.to_string()).stderr(Stdio::null()).status();
+            let _ = Command::new("kill")
+                .arg(pid.to_string())
+                .stderr(Stdio::null())
+                .status();
         }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
@@ -77,7 +83,12 @@ impl Sandbox {
 }
 
 fn alive(pid: u32) -> bool {
-    Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success()
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success()
 }
 
 fn wait_until(what: &str, f: impl Fn() -> bool) {
@@ -91,7 +102,11 @@ fn wait_until(what: &str, f: impl Fn() -> bool) {
 }
 
 fn pidfile(dir: &Path) -> Option<u32> {
-    std::fs::read_to_string(dir.join("d.pid")).ok()?.trim().parse().ok()
+    std::fs::read_to_string(dir.join("d.pid"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 #[test]
@@ -101,12 +116,18 @@ fn an_older_dispatcher_is_replaced_by_the_current_one_and_oc_stop_ends_it() {
     assert!(alive(old));
     sb.oc("ensure");
     wait_until("the old dispatcher is gone", || !alive(old));
-    wait_until("a new dispatcher owns the pidfile", || pidfile(&sb.dir).is_some_and(|p| p != old && alive(p)));
+    wait_until("a new dispatcher owns the pidfile", || {
+        pidfile(&sb.dir).is_some_and(|p| p != old && alive(p))
+    });
     let new = pidfile(&sb.dir).unwrap();
     wait_until("it registered its version", || {
-        std::fs::read_to_string(sb.dir.join("d.pid.d").join(new.to_string())).is_ok_and(|v| v.trim() == env!("CARGO_PKG_VERSION"))
+        std::fs::read_to_string(sb.dir.join("d.pid.d").join(new.to_string()))
+            .is_ok_and(|v| v.trim() == env!("CARGO_PKG_VERSION"))
     });
-    assert!(sb.oc("ensure").contains("already running"), "the current one is left alone");
+    assert!(
+        sb.oc("ensure").contains("already running"),
+        "the current one is left alone"
+    );
     assert_eq!(pidfile(&sb.dir), Some(new));
     sb.oc("stop");
     wait_until("oc stop ends it", || !alive(new));
@@ -140,14 +161,21 @@ fn a_stopped_dispatcher_stays_stopped_until_opencode_is_started_again() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    wait_until("the hub starts a dispatcher", || pidfile(&sb.dir).is_some_and(alive));
+    wait_until("the hub starts a dispatcher", || {
+        pidfile(&sb.dir).is_some_and(alive)
+    });
     let first = pidfile(&sb.dir).unwrap();
     sb.oc("stop");
     wait_until("the dispatcher is gone", || !alive(first));
     std::thread::sleep(Duration::from_millis(3500)); // several supervision rounds
-    assert!(pidfile(&sb.dir).is_none_or(|p| !alive(p)), "the supervising hub restarted a stopped dispatcher");
+    assert!(
+        pidfile(&sb.dir).is_none_or(|p| !alive(p)),
+        "the supervising hub restarted a stopped dispatcher"
+    );
     sb.oc("ensure"); // starting again is explicit
-    wait_until("it is started again", || pidfile(&sb.dir).is_some_and(alive));
+    wait_until("it is started again", || {
+        pidfile(&sb.dir).is_some_and(alive)
+    });
     sb.oc("stop");
     let _ = hub.kill();
     let _ = hub.wait();

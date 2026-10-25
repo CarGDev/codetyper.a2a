@@ -20,6 +20,9 @@ pub struct Snapshot {
     pub dispatcher: Option<bool>,
     /// (from, to) of every open task.
     pub tasks: Vec<(String, String)>,
+    /// Completed and failed tasks updated in the last 24 hours.
+    pub done: usize,
+    pub failed: usize,
     /// Agent types of the subagents running now.
     pub agents: Vec<String>,
     /// Finished tasks the requester has not been told about yet.
@@ -38,21 +41,67 @@ fn counted(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
+fn ansi(enabled: bool, code: &str, text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    enabled
+        .then(|| format!("\x1b[{code}m{text}\x1b[0m"))
+        .unwrap_or_else(|| text.to_owned())
+}
+
+fn colors_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none()
+        && (std::env::var("A2A_STATUSLINE_COLOR").as_deref() == Ok("1")
+            || std::io::IsTerminal::is_terminal(&std::io::stdout()))
+}
+
 pub fn render(s: &Snapshot) -> String {
+    render_with_color(s, colors_enabled())
+}
+
+pub fn render_with_color(s: &Snapshot, color: bool) -> String {
     let dot = match s.dispatcher {
         Some(true) => " ●",
         Some(false) => " ○",
         None => "",
     };
     let mut line = format!("a2a{dot}");
-    if !s.tasks.is_empty() {
-        let shown: Vec<String> = s.tasks.iter().take(MAX_TASKS_SHOWN).map(|(a, b)| format!("{a}>{b}")).collect();
-        let more = s.tasks.len().saturating_sub(MAX_TASKS_SHOWN);
-        let more = if more > 0 { format!(" +{more}") } else { String::new() };
-        line += &format!(" · {}: {}{more}", counted(s.tasks.len(), "task"), shown.join(", "));
+    if s.dispatcher.is_some() || !s.tasks.is_empty() || s.done > 0 || s.failed > 0 {
+        line += &format!(
+            " · {}",
+            ansi(color, "33", format!("{} open", s.tasks.len()))
+        );
+        if s.done > 0 {
+            line += &format!(" · {}", ansi(color, "32", format!("{} done", s.done)));
+        }
+        if s.failed > 0 {
+            line += &format!(" · {}", ansi(color, "31", format!("{} failed", s.failed)));
+        }
+        if !s.tasks.is_empty() {
+            let shown: Vec<String> = s
+                .tasks
+                .iter()
+                .take(MAX_TASKS_SHOWN)
+                .map(|(from, to)| format!("{from}>{to}"))
+                .collect();
+            let more = s.tasks.len().saturating_sub(MAX_TASKS_SHOWN);
+            let more = if more > 0 {
+                format!(" +{more}")
+            } else {
+                String::new()
+            };
+            line += &format!(
+                " · {}: {}{more}",
+                counted(s.tasks.len(), "task"),
+                shown.join(", ")
+            );
+        }
     }
     if !s.agents.is_empty() {
-        line += &format!(" · {}: {}", counted(s.agents.len(), "subagent"), s.agents.join(", "));
+        line += &format!(
+            " · {}: {}",
+            counted(s.agents.len(), "subagent"),
+            s.agents.join(", ")
+        );
     }
     if s.results > 0 {
         line += &format!(" · {} waiting", counted(s.results, "result"));
@@ -62,34 +111,53 @@ pub fn render(s: &Snapshot) -> String {
 
 /// A filename-safe agent id; ids come from hook stdin, so they are never used as paths.
 fn safe_id(v: &Value) -> Option<&str> {
-    v.as_str().filter(|id| !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    v.as_str().filter(|id| {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    })
 }
 
 /// One file per running subagent (`<dir>/<agent_id>`), written atomically, so hooks that fire at the
 /// same moment never lose each other's update. Returns whether the input named an agent.
 pub fn record(dir: &Path, stdin: &str, hook: Hook, now: u64) -> bool {
-    let Ok(input) = serde_json::from_str::<Value>(stdin) else { return false };
-    let Some(id) = safe_id(&input["agent_id"]) else { return false };
+    let Ok(input) = serde_json::from_str::<Value>(stdin) else {
+        return false;
+    };
+    let Some(id) = safe_id(&input["agent_id"]) else {
+        return false;
+    };
     let file = dir.join(id);
     if hook == Hook::Stop {
         let _ = std::fs::remove_file(&file);
         return true;
     }
-    let kind = input["agent_type"].as_str().filter(|t| !t.is_empty()).unwrap_or("agent");
+    let kind = input["agent_type"]
+        .as_str()
+        .filter(|t| !t.is_empty())
+        .unwrap_or("agent");
     let body = serde_json::json!({ "type": kind, "started": now }).to_string();
     let tmp = dir.join(format!(".{id}.{}.tmp", std::process::id()));
-    let written = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&tmp, body)).and_then(|_| std::fs::rename(&tmp, &file));
+    let written = std::fs::create_dir_all(dir)
+        .and_then(|_| std::fs::write(&tmp, body))
+        .and_then(|_| std::fs::rename(&tmp, &file));
     let _ = written.is_err().then(|| std::fs::remove_file(&tmp));
     true
 }
 
 /// Agent types of the entries that are not stale, oldest first.
 pub fn running(dir: &Path, now: u64) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut live: Vec<(u64, String)> = entries
         .filter_map(Result::ok)
         .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-        .filter_map(|e| serde_json::from_str::<Value>(&std::fs::read_to_string(e.path()).ok()?).ok())
+        .filter_map(|e| {
+            serde_json::from_str::<Value>(&std::fs::read_to_string(e.path()).ok()?).ok()
+        })
         .filter_map(|v| Some((v["started"].as_u64()?, v["type"].as_str()?.to_string())))
         .filter(|(started, _)| now.saturating_sub(*started) <= STALE_SECS)
         .collect();
@@ -98,24 +166,64 @@ pub fn running(dir: &Path, now: u64) -> Vec<String> {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Open tasks as (from, to), read-only: a missing or unreadable hub is just "no tasks".
 fn open_tasks(db: &Path) -> Option<Vec<(String, String)>> {
-    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    conn.busy_timeout(std::time::Duration::from_millis(300)).ok()?;
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(300))
+        .ok()?;
     let states = super::panel::OPEN.map(|s| format!("'{s}'")).join(",");
-    let mut st = conn.prepare(&format!("SELECT from_agent, to_agent FROM tasks WHERE state IN ({states}) ORDER BY created_at")).ok()?;
-    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).ok()?;
+    let mut st = conn
+        .prepare(&format!(
+            "SELECT from_agent, to_agent FROM tasks WHERE state IN ({states}) ORDER BY created_at"
+        ))
+        .ok()?;
+    let rows = st
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .ok()?;
     Some(rows.filter_map(Result::ok).collect())
 }
 
+fn recent_counts(db: &Path) -> (usize, usize) {
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return (0, 0);
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(300));
+    let cutoff = crate::hub::db::iso_ago_ms(86_400_000);
+    recent_counts_at(&conn, &cutoff)
+}
+
+fn recent_counts_at(conn: &rusqlite::Connection, cutoff: &str) -> (usize, usize) {
+    conn.query_row(
+        "SELECT COUNT(*) FILTER (WHERE state = 'completed'), COUNT(*) FILTER (WHERE state = 'failed') FROM tasks WHERE updated_at >= ?",
+        [cutoff],
+        |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as usize)),
+    ).unwrap_or((0, 0))
+}
+
 /// Task states that mean the requester has something to read.
-const FINISHED: [&str; 5] = ["input-required", "auth-required", "completed", "failed", "rejected"];
+const FINISHED: [&str; 5] = [
+    "input-required",
+    "auth-required",
+    "completed",
+    "failed",
+    "rejected",
+];
 
 fn requester() -> String {
-    std::env::var("A2A_REQUESTER").ok().filter(|r| !r.is_empty()).unwrap_or_else(|| "orchestrator".into())
+    std::env::var("A2A_REQUESTER")
+        .ok()
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "orchestrator".into())
 }
 
 /// A finished task the requester has not been told about.
@@ -127,8 +235,16 @@ struct Pending {
 }
 
 fn status_text(status_message: Option<&str>) -> String {
-    let parts = status_message.and_then(|m| serde_json::from_str::<Value>(m).ok()).map(|m| m["parts"].clone()).unwrap_or(Value::Null);
-    let text: Vec<&str> = parts.as_array().into_iter().flatten().filter_map(|p| p["text"].as_str()).collect();
+    let parts = status_message
+        .and_then(|m| serde_json::from_str::<Value>(m).ok())
+        .map(|m| m["parts"].clone())
+        .unwrap_or(Value::Null);
+    let text: Vec<&str> = parts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["text"].as_str())
+        .collect();
     text.join(" ").chars().take(400).collect()
 }
 
@@ -146,18 +262,46 @@ fn pending(conn: &rusqlite::Connection, agent: &str, cwd: Option<&str>) -> Optio
     let rows = st
         .query_map([agent], |r| {
             let (own, dir): (Option<String>, Option<String>) = (r.get(5)?, r.get(4)?);
-            Ok((Pending { id: r.get(0)?, to: r.get(1)?, state: r.get(2)?, text: status_text(r.get::<_, Option<String>>(3)?.as_deref()) }, own.or(dir.clone()), dir))
+            Ok((
+                Pending {
+                    id: r.get(0)?,
+                    to: r.get(1)?,
+                    state: r.get(2)?,
+                    text: status_text(r.get::<_, Option<String>>(3)?.as_deref()),
+                },
+                own.or(dir.clone()),
+                dir,
+            ))
         })
         .ok()?;
     let here = |own: &Option<String>, dir: &Option<String>| match cwd {
         None => true,
-        Some(c) => [own, dir].into_iter().flatten().any(|d| d == c || crate::hub::project::same_project(c, d)),
+        Some(c) => [own, dir]
+            .into_iter()
+            .flatten()
+            .any(|d| d == c || crate::hub::project::same_project(c, d)),
     };
-    Some(rows.filter_map(Result::ok).filter(|(_, own, dir)| here(own, dir)).map(|(p, _, _)| p).collect())
+    Some(
+        rows.filter_map(Result::ok)
+            .filter(|(_, own, dir)| here(own, dir))
+            .map(|(p, _, _)| p)
+            .collect(),
+    )
 }
 
 fn results_context(list: &[Pending]) -> String {
-    let lines: Vec<String> = list.iter().map(|p| format!("- task {} ({}) is {}: {}", &p.id[..8.min(p.id.len())], p.to, p.state, p.text)).collect();
+    let lines: Vec<String> = list
+        .iter()
+        .map(|p| {
+            format!(
+                "- task {} ({}) is {}: {}",
+                &p.id[..8.min(p.id.len())],
+                p.to,
+                p.state,
+                p.text
+            )
+        })
+        .collect();
     format!(
         "A2A results waiting for you ({}):\n{}\nRead one in full with mcp__a2a__get_task {{id}}; answer a question with mcp__a2a__send_message {{taskId}}.",
         list.len(),
@@ -168,29 +312,47 @@ fn results_context(list: &[Pending]) -> String {
 /// The UserPromptSubmit hook: prints the context JSON and marks the results seen. Silent when there is
 /// nothing to say, no hub, or the input is not a hook payload.
 fn inbox(stdin: &str, db: &Path) -> Option<String> {
-    let cwd = serde_json::from_str::<Value>(stdin).ok()?["cwd"].as_str().map(String::from)?;
-    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
-    conn.busy_timeout(std::time::Duration::from_millis(300)).ok()?;
+    let cwd = serde_json::from_str::<Value>(stdin).ok()?["cwd"]
+        .as_str()
+        .map(String::from)?;
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .ok()?;
+    conn.busy_timeout(std::time::Duration::from_millis(300))
+        .ok()?;
     let list = pending(&conn, &requester(), Some(&cwd)).filter(|l| !l.is_empty())?;
     let out = serde_json::json!({ "hookSpecificOutput": { "hookEventName": "UserPromptSubmit", "additionalContext": results_context(&list) } });
     let ts = crate::hub::db::now();
     list.iter().for_each(|p| {
-        let _ = conn.execute("UPDATE tasks SET requester_seen_at = ? WHERE id = ?", rusqlite::params![ts, p.id]);
+        let _ = conn.execute(
+            "UPDATE tasks SET requester_seen_at = ? WHERE id = ?",
+            rusqlite::params![ts, p.id],
+        );
     });
     Some(out.to_string())
 }
 
 fn results_waiting(db: &Path) -> usize {
-    let open = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
-    open.and_then(|c| pending(&c, &requester(), None)).map_or(0, |l| l.len())
+    let open =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+    open.and_then(|c| pending(&c, &requester(), None))
+        .map_or(0, |l| l.len())
 }
 
 fn snapshot(now: u64) -> Snapshot {
     let db: PathBuf = paths::db_path();
     let tasks = db.is_file().then(|| open_tasks(&db)).flatten();
     Snapshot {
-        results: if tasks.is_some() { results_waiting(&db) } else { 0 },
-        dispatcher: tasks.as_ref().map(|_| sys::dispatcher_pid(&paths::dispatcher_pid_path()).is_some()),
+        done: tasks.as_ref().map_or(0, |_| recent_counts(&db).0),
+        failed: tasks.as_ref().map_or(0, |_| recent_counts(&db).1),
+        results: if tasks.is_some() {
+            results_waiting(&db)
+        } else {
+            0
+        },
+        dispatcher: tasks
+            .as_ref()
+            .map(|_| sys::dispatcher_pid(&paths::dispatcher_pid_path()).is_some()),
         tasks: tasks.unwrap_or_default(),
         agents: running(&paths::statusline_dir(), now),
     }
@@ -219,15 +381,28 @@ fn ensure_args(exe_name: &str, tmux: Option<&str>) -> Option<Vec<&'static str>> 
 
 /// Start `oc ensure` and return at once; its output goes nowhere.
 fn spawn_ensure() {
-    let Ok(exe) = std::env::current_exe() else { return };
-    let name = exe.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-    let Some(args) = ensure_args(&name, std::env::var("TMUX").ok().as_deref()) else { return };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let name = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let Some(args) = ensure_args(&name, std::env::var("TMUX").ok().as_deref()) else {
+        return;
+    };
     let _ = sys::spawn_detached(&exe, &args, Path::new("/dev/null"));
 }
 
 /// `oc statusline [--hook start|stop]`; always exits 0 so it can never break Claude Code.
 pub fn run(args: &[String]) -> i32 {
-    let hook = match args.iter().position(|a| a == "--hook").and_then(|i| args.get(i + 1)).map(String::as_str) {
+    let hook = match args
+        .iter()
+        .position(|a| a == "--hook")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+    {
         Some("start") => Some(Hook::Start),
         Some("stop") => Some(Hook::Stop),
         Some("inbox") => Some(Hook::Inbox),
@@ -255,68 +430,184 @@ mod tests {
     use super::*;
 
     fn tmp(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("a2a-statusline-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("a2a-statusline-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
 
     fn tasks(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     #[test]
     fn render_is_a_single_short_line() {
-        let idle = Snapshot { dispatcher: Some(true), ..Snapshot::default() };
-        assert_eq!(render(&idle), "a2a ●");
-        assert_eq!(render(&Snapshot::default()), "a2a");
-        let down = Snapshot { dispatcher: Some(false), ..Snapshot::default() };
-        assert_eq!(render(&down), "a2a ○");
+        let idle = Snapshot {
+            dispatcher: Some(true),
+            ..Snapshot::default()
+        };
+        assert_eq!(render_with_color(&idle, false), "a2a ● · 0 open");
+        assert_eq!(render_with_color(&Snapshot::default(), false), "a2a");
+        let down = Snapshot {
+            dispatcher: Some(false),
+            ..Snapshot::default()
+        };
+        assert_eq!(render_with_color(&down, false), "a2a ○ · 0 open");
         let busy = Snapshot {
             dispatcher: Some(true),
             tasks: tasks(&[("orchestrator", "coder"), ("coder", "tester"), ("a", "b")]),
+            done: 0,
+            failed: 0,
             agents: vec!["Explore".into(), "Plan".into()],
             results: 0,
         };
-        let line = render(&busy);
-        assert_eq!(line, "a2a ● · 3 tasks: orchestrator>coder, coder>tester +1 · 2 subagents: Explore, Plan");
+        let line = render_with_color(&busy, false);
+        assert_eq!(
+            line,
+            "a2a ● · 3 open · 3 tasks: orchestrator>coder, coder>tester +1 · 2 subagents: Explore, Plan"
+        );
         assert!(!line.contains('\n'));
     }
 
     #[test]
     fn ensure_runs_only_inside_tmux_and_never_doubles_the_oc_word() {
-        assert_eq!(ensure_args("codetypera2a", Some("/tmp/tmux-1/default,123,0")), Some(vec!["oc", "ensure"]));
-        assert_eq!(ensure_args("oc", Some("/tmp/tmux-1/default,123,0")), Some(vec!["ensure"]));
+        assert_eq!(
+            ensure_args("codetypera2a", Some("/tmp/tmux-1/default,123,0")),
+            Some(vec!["oc", "ensure"])
+        );
+        assert_eq!(
+            ensure_args("oc", Some("/tmp/tmux-1/default,123,0")),
+            Some(vec!["ensure"])
+        );
         assert_eq!(ensure_args("codetypera2a", None), None);
         assert_eq!(ensure_args("codetypera2a", Some("")), None);
     }
 
     #[test]
     fn render_pluralises_and_names_one_subagent() {
-        let s = Snapshot { dispatcher: None, tasks: tasks(&[("a", "b")]), agents: vec!["Explore".into()], results: 1 };
-        assert_eq!(render(&s), "a2a · 1 task: a>b · 1 subagent: Explore · 1 result waiting");
+        let s = Snapshot {
+            dispatcher: None,
+            tasks: tasks(&[("a", "b")]),
+            done: 0,
+            failed: 0,
+            agents: vec!["Explore".into()],
+            results: 1,
+        };
+        assert_eq!(
+            render_with_color(&s, false),
+            "a2a · 1 open · 1 task: a>b · 1 subagent: Explore · 1 result waiting"
+        );
+    }
+
+    #[test]
+    fn render_includes_nonzero_recent_results_and_omits_zero_parts() {
+        let s = Snapshot {
+            tasks: tasks(&[("a", "b")]),
+            done: 12,
+            failed: 1,
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            render_with_color(&s, false),
+            "a2a · 1 open · 12 done · 1 failed · 1 task: a>b"
+        );
+        let zero = Snapshot {
+            done: 0,
+            failed: 0,
+            ..s
+        };
+        assert_eq!(
+            render_with_color(&zero, false),
+            "a2a · 1 open · 1 task: a>b"
+        );
+    }
+
+    #[test]
+    fn render_colors_counts_and_supports_no_color() {
+        let s = Snapshot {
+            tasks: tasks(&[("a", "b")]),
+            done: 2,
+            failed: 1,
+            ..Snapshot::default()
+        };
+        let colored = render_with_color(&s, true);
+        assert!(colored.contains("\x1b[33m1 open\x1b[0m"));
+        assert!(colored.contains("\x1b[32m2 done\x1b[0m"));
+        assert!(colored.contains("\x1b[31m1 failed\x1b[0m"));
+        assert!(!render_with_color(&s, false).contains('\x1b'));
+    }
+
+    #[test]
+    fn recent_counts_include_the_exact_cutoff() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE tasks (state TEXT, updated_at TEXT)", [])
+            .unwrap();
+        let cutoff = "2026-01-01T00:00:00.000Z";
+        conn.execute(
+            "INSERT INTO tasks (state, updated_at) VALUES ('completed', ?), ('failed', ?), ('completed', '2025-12-31T23:59:59.999Z')",
+            rusqlite::params![cutoff, cutoff],
+        ).unwrap();
+        assert_eq!(recent_counts_at(&conn, cutoff), (1, 1));
     }
 
     #[test]
     fn hook_start_then_stop_records_and_clears_a_subagent() {
         let dir = tmp("hook");
-        assert!(record(&dir, r#"{"agent_id":"ag-1","agent_type":"Explore","session_id":"s"}"#, Hook::Start, 1000));
-        assert!(record(&dir, r#"{"agent_id":"ag-2","agent_type":"Plan"}"#, Hook::Start, 1001));
+        assert!(record(
+            &dir,
+            r#"{"agent_id":"ag-1","agent_type":"Explore","session_id":"s"}"#,
+            Hook::Start,
+            1000
+        ));
+        assert!(record(
+            &dir,
+            r#"{"agent_id":"ag-2","agent_type":"Plan"}"#,
+            Hook::Start,
+            1001
+        ));
         assert_eq!(running(&dir, 1002), vec!["Explore", "Plan"]);
         assert!(record(&dir, r#"{"agent_id":"ag-1"}"#, Hook::Stop, 1003));
         assert_eq!(running(&dir, 1004), vec!["Plan"]);
-        assert!(!dir.read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(".tmp")), "no temp files left");
+        assert!(
+            !dir.read_dir().unwrap().any(|e| e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp")),
+            "no temp files left"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn stale_entries_expire_and_bad_input_is_ignored() {
         let dir = tmp("stale");
-        record(&dir, r#"{"agent_id":"old","agent_type":"Explore"}"#, Hook::Start, 1000);
+        record(
+            &dir,
+            r#"{"agent_id":"old","agent_type":"Explore"}"#,
+            Hook::Start,
+            1000,
+        );
         assert_eq!(running(&dir, 1000 + STALE_SECS), vec!["Explore"]);
-        assert!(running(&dir, 1000 + STALE_SECS + 1).is_empty(), "older than the limit is ignored");
-        assert!(!record(&dir, "not json", Hook::Start, 1), "garbage stdin records nothing");
-        assert!(!record(&dir, r#"{"agent_type":"x"}"#, Hook::Start, 1), "no agent id, nothing to key on");
-        assert!(!record(&dir, r#"{"agent_id":"../../etc"}"#, Hook::Start, 1), "ids are not paths");
+        assert!(
+            running(&dir, 1000 + STALE_SECS + 1).is_empty(),
+            "older than the limit is ignored"
+        );
+        assert!(
+            !record(&dir, "not json", Hook::Start, 1),
+            "garbage stdin records nothing"
+        );
+        assert!(
+            !record(&dir, r#"{"agent_type":"x"}"#, Hook::Start, 1),
+            "no agent id, nothing to key on"
+        );
+        assert!(
+            !record(&dir, r#"{"agent_id":"../../etc"}"#, Hook::Start, 1),
+            "ids are not paths"
+        );
         assert!(running(&tmp("missing"), 5).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

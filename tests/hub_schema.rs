@@ -1,4 +1,4 @@
-//! The hub database migrates from the original (v1) schema to a2a_hub.dbml (v5) without losing rows.
+//! The hub database migrates from the original (v1) schema to a2a_hub.dbml (v6) without losing rows.
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -37,10 +37,10 @@ fn tmp(name: &str) -> PathBuf {
     d
 }
 
-/// Any `oc` call opens (and so migrates) the database.
+/// A mutating `oc` call opens (and so migrates) the database.
 fn open_via_oc(db: &std::path::Path) {
     let st = Command::new(env!("CARGO_BIN_EXE_codetypera2a"))
-        .args(["oc", "status"])
+        .args(["oc", "continue", "__schema_seed__"])
         .env("A2A_DB", db)
         .env("A2A_DISPATCHER_PID", db.with_extension("pid"))
         .env("OPENCODE_BIN", "/usr/bin/false")
@@ -48,7 +48,11 @@ fn open_via_oc(db: &std::path::Path) {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    assert!(st.status.success(), "{}", String::from_utf8_lossy(&st.stderr));
+    assert!(
+        st.status.success(),
+        "{}",
+        String::from_utf8_lossy(&st.stderr)
+    );
 }
 
 fn one(c: &rusqlite::Connection, sql: &str) -> String {
@@ -63,26 +67,94 @@ fn one(c: &rusqlite::Connection, sql: &str) -> String {
 }
 
 #[test]
-fn fresh_database_is_v5_with_every_table() {
+fn fresh_database_is_v6_with_every_table() {
     let d = tmp("fresh");
     let db = d.join("hub.db");
     open_via_oc(&db);
     let c = rusqlite::Connection::open(&db).unwrap();
-    assert_eq!(one(&c, "PRAGMA user_version"), "5");
-    for t in ["agents", "contexts", "tasks", "sessions", "nudges", "hop_allow", "events"] {
-        assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM sqlite_master WHERE name='{t}'")), "1", "{t}");
+    assert_eq!(one(&c, "PRAGMA user_version"), "6");
+    for t in [
+        "agents",
+        "contexts",
+        "tasks",
+        "sessions",
+        "nudges",
+        "hop_allow",
+        "events",
+    ] {
+        assert_eq!(
+            one(
+                &c,
+                &format!("SELECT COUNT(*) FROM sqlite_master WHERE name='{t}'")
+            ),
+            "1",
+            "{t}"
+        );
     }
     for col in ["version", "claimed_by", "parent_task_id", "priority"] {
-        assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='{col}'")), "1", "{col}");
+        assert_eq!(
+            one(
+                &c,
+                &format!("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='{col}'")
+            ),
+            "1",
+            "{col}"
+        );
     }
-    assert_eq!(one(&c, "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='backend'"), "1");
-    assert_eq!(one(&c, "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='model'"), "1");
-    assert_eq!(one(&c, "SELECT COUNT(*) FROM sqlite_master WHERE name='idx_events_model'"), "1");
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='backend'"
+        ),
+        "1"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='model'"
+        ),
+        "1"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='idx_events_model'"
+        ),
+        "1"
+    );
     for col in ["source", "ref"] {
-        assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='{col}'")), "1", "{col}");
+        assert_eq!(
+            one(
+                &c,
+                &format!("SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='{col}'")
+            ),
+            "1",
+            "{col}"
+        );
     }
-    for name in ["idx_events_source_model", "idx_events_source_ref", "ingest_offsets"] {
-        assert_eq!(one(&c, &format!("SELECT COUNT(*) FROM sqlite_master WHERE name='{name}'")), "1", "{name}");
+    for col in ["tokens_cache_read", "tokens_cache_write"] {
+        assert_eq!(
+            one(
+                &c,
+                &format!("SELECT COUNT(*) FROM pragma_table_info('events') WHERE name='{col}'")
+            ),
+            "1",
+            "{col}"
+        );
+    }
+    for name in [
+        "idx_events_source_model",
+        "idx_events_source_ref",
+        "ingest_offsets",
+    ] {
+        assert_eq!(
+            one(
+                &c,
+                &format!("SELECT COUNT(*) FROM sqlite_master WHERE name='{name}'")
+            ),
+            "1",
+            "{name}"
+        );
     }
     let _ = std::fs::remove_dir_all(&d);
 }
@@ -91,24 +163,128 @@ fn fresh_database_is_v5_with_every_table() {
 fn v1_database_is_migrated_and_keeps_its_rows() {
     let d = tmp("v1");
     let db = d.join("hub.db");
-    rusqlite::Connection::open(&db).unwrap().execute_batch(V1).unwrap();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute_batch(V1)
+        .unwrap();
     open_via_oc(&db);
     open_via_oc(&db); // idempotent
     let c = rusqlite::Connection::open(&db).unwrap();
-    assert_eq!(one(&c, "PRAGMA user_version"), "5");
-    assert!(d.join("hub.db.bak-v1").exists(), "a backup of the v1 file is kept");
+    assert_eq!(one(&c, "PRAGMA user_version"), "6");
+    assert!(
+        d.join("hub.db.bak-v1").exists(),
+        "a backup of the v1 file is kept"
+    );
     assert_eq!(one(&c, "SELECT COUNT(*) FROM tasks"), "2");
-    assert_eq!(one(&c, "SELECT history FROM tasks WHERE id='task-done-1'"), "[]", "invalid JSON is repaired");
-    assert_eq!(one(&c, "SELECT completed_at FROM tasks WHERE id='task-done-1'"), "t3");
-    assert_eq!(one(&c, "SELECT state FROM contexts WHERE id='c1'"), "active");
-    assert_eq!(one(&c, "SELECT COUNT(*) FROM agents WHERE name IN ('orchestrator','any','mentor')"), "3");
+    assert_eq!(
+        one(&c, "SELECT history FROM tasks WHERE id='task-done-1'"),
+        "[]",
+        "invalid JSON is repaired"
+    );
+    assert_eq!(
+        one(&c, "SELECT completed_at FROM tasks WHERE id='task-done-1'"),
+        "t3"
+    );
+    assert_eq!(
+        one(&c, "SELECT state FROM contexts WHERE id='c1'"),
+        "active"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM agents WHERE name IN ('orchestrator','any','mentor')"
+        ),
+        "3"
+    );
     assert_eq!(one(&c, "SELECT length(key) FROM sessions"), "32");
-    assert_eq!(one(&c, "SELECT status FROM nudges WHERE key='k1'"), "delivered");
+    assert_eq!(
+        one(&c, "SELECT status FROM nudges WHERE key='k1'"),
+        "delivered"
+    );
     assert_eq!(one(&c, "SELECT status FROM nudges WHERE key='k2'"), "dead");
-    assert_eq!(one(&c, "SELECT COUNT(*) FROM nudges WHERE key='k3'"), "0", "orphan nudge dropped");
-    assert_eq!(one(&c, "SELECT grants FROM hop_allow WHERE context_id='c1'"), "2");
+    assert_eq!(
+        one(&c, "SELECT COUNT(*) FROM nudges WHERE key='k3'"),
+        "0",
+        "orphan nudge dropped"
+    );
+    assert_eq!(
+        one(&c, "SELECT grants FROM hop_allow WHERE context_id='c1'"),
+        "2"
+    );
     assert_eq!(one(&c, "SELECT COUNT(*) FROM events"), "1");
-    assert_eq!(one(&c, "SELECT model FROM events"), "NULL", "no usage event, no model");
-    assert_eq!(one(&c, "SELECT COUNT(*) FROM pragma_foreign_key_check"), "0");
+    assert_eq!(
+        one(&c, "SELECT model FROM events"),
+        "NULL",
+        "no usage event, no model"
+    );
+    assert_eq!(
+        one(&c, "SELECT COUNT(*) FROM pragma_foreign_key_check"),
+        "0"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// A v5 file: Claude Code rows summed cache into `tokens_in`; they are derived data and are rebuilt, opencode rows stay.
+#[test]
+fn v5_database_drops_derived_claude_rows_and_their_offsets_and_keeps_the_rest() {
+    let d = tmp("v5");
+    let db = d.join("hub.db");
+    open_via_oc(&db);
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(
+            "ALTER TABLE events DROP COLUMN tokens_cache_read; ALTER TABLE events DROP COLUMN tokens_cache_write;
+             INSERT INTO events (ts, kind, tokens_in, tokens_out, source, ref) VALUES ('t','usage',9,1,'claude-code','m1');
+             INSERT INTO events (ts, kind, tokens_in, tokens_out, source, ref) VALUES ('t','usage',5,1,NULL,NULL);
+             INSERT INTO events (ts, kind, tokens_in, tokens_out, source, ref) VALUES ('t','usage',6,1,'other','x');
+             INSERT INTO ingest_offsets VALUES ('claude-code','/p/a.jsonl',100,'t');
+             INSERT INTO ingest_offsets VALUES ('other','/p/b',7,'t');
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
+    }
+    open_via_oc(&db);
+    open_via_oc(&db); // idempotent
+    let c = rusqlite::Connection::open(&db).unwrap();
+    assert_eq!(one(&c, "PRAGMA user_version"), "6");
+    assert!(
+        d.join("hub.db.bak-v5").exists(),
+        "a backup of the v5 file is kept"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM events WHERE source = 'claude-code'"
+        ),
+        "0"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM events WHERE source IS NULL OR source = 'other'"
+        ),
+        "2"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT tokens_cache_read FROM events WHERE source = 'other'"
+        ),
+        "NULL"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM ingest_offsets WHERE source = 'claude-code'"
+        ),
+        "0"
+    );
+    assert_eq!(
+        one(
+            &c,
+            "SELECT COUNT(*) FROM ingest_offsets WHERE source = 'other'"
+        ),
+        "1"
+    );
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -46,6 +46,7 @@ src/launcher/statusline.rs  `oc statusline`, the Claude Code footer line and its
 src/opencode.rs        the opencode API calls (sessions, agents, tabs file)
 src/sys.rs             process helpers (`opencode api`, tmux, pid checks)
 src/model_guard.rs     model policy checks
+src/ollama.rs          Ollama discovery (`init --ollama-url`) and the opencode provider entries
 src/models.rs          `models` screen, per-agent model overrides (also written into the agent files)
 src/stats_view.rs      `oc stats` and `oc stats --model` tables (sorted, coloured, blank when unknown)
 src/launcher/panel.rs  `oc status --json` and `oc answer`, the data the opencode panels read
@@ -181,7 +182,7 @@ change to the schema constant so fresh databases match. Keep new columns nullabl
 Update `a2a_hub.dbml` and `db.dbml`, and test a migration from a hand-built old file, a fresh file, a second open
 (no-op) and a concurrent open. `migrate()` upgrades step by step (`upgrade_from`), so a v2 file reaches the
 current version in one open; test the newest step from a file downgraded to the previous version, and that a v1 and a
-v2 file still reach it. `sessions.backend` (v5, NULL = opencode) is the model for a nullable column that needs no backfill: the step is one
+v2 file still reach it. `events.tokens_cache_read`/`tokens_cache_write` (v6) also delete the derived `claude-code` rows and their `ingest_offsets` in the same step so the next ingest rebuilds them (`<db>.bak-v5`). `sessions.backend` (v5, NULL = opencode) is the model for a nullable column that needs no backfill: the step is one
 `ALTER TABLE ... ADD COLUMN`, `upgrade_from` backs the file up as `<db>.bak-v4` and each older step still runs first.
 A column or table that another tool's data fills (`events.source`/`ref`, `ingest_offsets`)
 needs a unique key per source so a rerun of its reader inserts nothing.

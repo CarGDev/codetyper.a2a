@@ -49,12 +49,19 @@ pub fn run_timeout(cmd: &str, args: &[&str], timeout: Option<Duration>) -> Resul
             Err(e) => return Err(format!("{cmd}: {e}")),
         }
     };
-    let (stdout, stderr) = (t_out.join().unwrap_or_default(), t_err.join().unwrap_or_default());
+    let (stdout, stderr) = (
+        t_out.join().unwrap_or_default(),
+        t_err.join().unwrap_or_default(),
+    );
     if status.success() {
         Ok(stdout.trim().to_string())
     } else {
         let msg = first_line(&stderr);
-        Err(if msg.is_empty() { format!("{cmd} exited with {status}") } else { msg })
+        Err(if msg.is_empty() {
+            format!("{cmd} exited with {status}")
+        } else {
+            msg
+        })
     }
 }
 
@@ -81,7 +88,11 @@ pub fn tmux_ok(args: &[&str]) -> bool {
 fn run_via_file(cmd: &str, args: &[&str], timeout: Duration) -> Result<String, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!("a2a-api-{}-{}.out", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+    let path = std::env::temp_dir().join(format!(
+        "a2a-api-{}-{}.out",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
     let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let result = (|| {
         let mut child = Command::new(cmd)
@@ -118,7 +129,11 @@ fn run_via_file(cmd: &str, args: &[&str], timeout: Duration) -> Result<String, S
             Ok(stdout.trim().to_string())
         } else {
             let msg = first_line(&stderr);
-            Err(if msg.is_empty() { format!("{cmd} exited with {status}") } else { msg })
+            Err(if msg.is_empty() {
+                format!("{cmd} exited with {status}")
+            } else {
+                msg
+            })
         }
     })();
     let _ = std::fs::remove_file(&path);
@@ -152,12 +167,16 @@ pub fn pid_command(pid: u32) -> Option<String> {
 }
 
 pub fn kill_term(pid: u32) {
-    let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status();
 }
 
 /// TERM a whole process group (`pid` leads it): a headless turn and the tools it started.
 pub fn kill_group_term(pid: u32) {
-    let _ = Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).status();
+    let _ = Command::new("kill")
+        .args(["-TERM", "--", &format!("-{pid}")])
+        .status();
 }
 
 /// The dispatcher process is this binary run as `codetypera2a dispatcher`, or through the `oc`
@@ -178,7 +197,13 @@ pub fn dir_base(dir: &str) -> String {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || "_.-".contains(c) { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "_.-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(24)
         .collect();
     if base.is_empty() { "root".into() } else { base }
@@ -186,27 +211,43 @@ pub fn dir_base(dir: &str) -> String {
 
 /// pid of the running dispatcher recorded in `pid_file`, if that process is really one.
 pub fn dispatcher_pid(pid_file: &std::path::Path) -> Option<u32> {
-    let pid: u32 = std::fs::read_to_string(pid_file).ok()?.trim().parse().ok().filter(|p| *p != 0)?;
+    let pid: u32 = std::fs::read_to_string(pid_file)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|p| *p != 0)?;
     if !pid_alive(pid) {
         return None;
     }
-    pid_command(pid).filter(|c| is_dispatcher_command(c)).map(|_| pid)
+    pid_command(pid)
+        .filter(|c| is_dispatcher_command(c))
+        .map(|_| pid)
 }
 
 /// Percent-encode a query-string value.
 pub fn url_encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
 }
 
 /// Start `exe args` detached in its own process group, output appended to `log`.
-pub fn spawn_detached(exe: &std::path::Path, args: &[&str], log: &std::path::Path) -> std::io::Result<u32> {
+pub fn spawn_detached(
+    exe: &std::path::Path,
+    args: &[&str],
+    log: &std::path::Path,
+) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt;
-    let out = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+    let out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)?;
     let err = out.try_clone()?;
     let mut child = Command::new(exe)
         .args(args)
@@ -234,7 +275,9 @@ pub enum Tab {
 /// Make sure the tmux session of the current pane has a window (tab) called `name` running `cmd`;
 /// a closed one is opened again. The window is created detached, so focus stays where it is.
 pub fn tmux_ensure_window(name: &str, cmd: &str) -> Result<Tab, String> {
-    let Some(pane) = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty()) else { return Ok(Tab::NotInTmux) };
+    let Some(pane) = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty()) else {
+        return Ok(Tab::NotInTmux);
+    };
     let sess = tmux(&["display-message", "-p", "-t", &pane, "#{session_name}"])?;
     let windows = tmux(&["list-windows", "-t", &sess, "-F", "#{window_name}"])?;
     if windows.lines().any(|w| w == name) {
@@ -243,14 +286,34 @@ pub fn tmux_ensure_window(name: &str, cmd: &str) -> Result<Tab, String> {
     // Concurrent callers (hub, tui plugin, oc) all see "no window" at once: only the one that
     // takes the lock opens it. A lock older than 20s is stale.
     let lock = std::env::temp_dir().join(format!("a2a-window-{}.lock", name.replace('/', "_")));
-    let stale = std::fs::metadata(&lock).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|d| d.as_secs() > 20);
+    let stale = std::fs::metadata(&lock)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|d| d.as_secs() > 20);
     if stale {
         let _ = std::fs::remove_file(&lock);
     }
-    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+        .is_err()
+    {
         return Ok(Tab::AlreadyOpen);
     }
-    tmux(&["new-window", "-d", "-t", &format!("{sess}:"), "-n", name, cmd]).map(|_| Tab::Created)
+    let opened = tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        &format!("{sess}:"),
+        "-n",
+        name,
+        cmd,
+    ]);
+    // released once the window exists (or failed), so a window closed later can be opened again at once
+    let _ = std::fs::remove_file(&lock);
+    opened.map(|_| Tab::Created)
 }
 
 #[cfg(test)]
@@ -259,10 +322,14 @@ mod tests {
 
     #[test]
     fn dispatcher_is_recognised_under_both_names() {
-        assert!(is_dispatcher_command("/opt/homebrew/bin/codetypera2a dispatcher"));
+        assert!(is_dispatcher_command(
+            "/opt/homebrew/bin/codetypera2a dispatcher"
+        ));
         assert!(is_dispatcher_command("/Users/me/.cargo/bin/oc dispatch"));
         assert!(!is_dispatcher_command("/Users/me/.cargo/bin/oc status"));
         assert!(!is_dispatcher_command("opencode dispatch"));
-        assert!(!is_dispatcher_command("/Users/me/.cargo/bin/codetypera2a hub"));
+        assert!(!is_dispatcher_command(
+            "/Users/me/.cargo/bin/codetypera2a hub"
+        ));
     }
 }

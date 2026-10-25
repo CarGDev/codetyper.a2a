@@ -18,7 +18,10 @@ fn version_flags_print_the_crate_version() {
 #[test]
 fn oc_version_prints_the_crate_version() {
     let bin = env!("CARGO_BIN_EXE_codetypera2a");
-    let out = Command::new(bin).args(["oc", "--version"]).output().expect("run oc");
+    let out = Command::new(bin)
+        .args(["oc", "--version"])
+        .output()
+        .expect("run oc");
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     assert_eq!(text.trim(), format!("oc {}", env!("CARGO_PKG_VERSION")));

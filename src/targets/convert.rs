@@ -36,7 +36,9 @@ const COMPANIONS: [&str; 3] = ["mcp__codegraph__*", "mcp__engram__*", "mcp__cont
 const TIERS: [&str; 3] = ["haiku", "sonnet", "opus"];
 
 /// Colors Claude Code accepts.
-const COLORS: [&str; 8] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
+const COLORS: [&str; 8] = [
+    "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
+];
 
 /// Hue (degrees, exclusive upper bound) -> color name, for hex colors such as `#bb9af7`.
 const HUES: [(f32, &str); 9] = [
@@ -67,11 +69,20 @@ fn parse(text: &str) -> Result<(Vec<Entry>, &str), String> {
     for line in rest[..end].lines().filter(|l| !l.trim().is_empty()) {
         let nested = line.starts_with(char::is_whitespace);
         if nested {
-            entries.last_mut().into_iter().for_each(|e| e.block.push(line.to_string()));
+            entries
+                .last_mut()
+                .into_iter()
+                .for_each(|e| e.block.push(line.to_string()));
             continue;
         }
-        let Some((key, value)) = line.split_once(':').filter(|_| !line.starts_with('#')) else { continue };
-        entries.push(Entry { key: key.trim().to_string(), value: value.trim().to_string(), block: Vec::new() });
+        let Some((key, value)) = line.split_once(':').filter(|_| !line.starts_with('#')) else {
+            continue;
+        };
+        entries.push(Entry {
+            key: key.trim().to_string(),
+            value: value.trim().to_string(),
+            block: Vec::new(),
+        });
     }
     Ok((entries, &rest[body_at..]))
 }
@@ -82,7 +93,11 @@ fn get<'a>(entries: &'a [Entry], key: &str) -> Option<&'a Entry> {
 
 /// A YAML scalar as plain text: double quotes (JSON escapes) and single quotes removed.
 fn scalar(v: &str) -> String {
-    if let Some(s) = v.starts_with('"').then(|| serde_json::from_str::<String>(v).ok()).flatten() {
+    if let Some(s) = v
+        .starts_with('"')
+        .then(|| serde_json::from_str::<String>(v).ok())
+        .flatten()
+    {
         return s;
     }
     match v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
@@ -94,7 +109,12 @@ fn scalar(v: &str) -> String {
 /// The description as a double-quoted YAML string (opencode accepts plain text with `: ` inside, YAML does not).
 fn description(entries: &[Entry]) -> Result<String, String> {
     let e = get(entries, "description").ok_or("missing description")?;
-    let folded = e.block.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+    let folded = e
+        .block
+        .iter()
+        .map(|l| l.trim())
+        .collect::<Vec<_>>()
+        .join(" ");
     let text = match e.value.as_str() {
         "" | ">" | "|" => folded,
         v => scalar(v),
@@ -114,7 +134,12 @@ fn agent_tool(permission: &Entry) -> Option<String> {
     let allowed: Vec<&str> = permission.block[start + 1..]
         .iter()
         .take_while(|l| indent(l) > base)
-        .filter_map(|l| l.trim().split_once(':').filter(|(_, rule)| rule.trim() == "allow").map(|(name, _)| name.trim().trim_matches('"')))
+        .filter_map(|l| {
+            l.trim()
+                .split_once(':')
+                .filter(|(_, rule)| rule.trim() == "allow")
+                .map(|(name, _)| name.trim().trim_matches('"'))
+        })
         .collect();
     match allowed.as_slice() {
         [] => None,
@@ -126,8 +151,15 @@ fn agent_tool(permission: &Entry) -> Option<String> {
 fn tools(entry: &Entry, permission: Option<&Entry>) -> String {
     let mut out: Vec<String> = Vec::new();
     for line in &entry.block {
-        let Some((name, on)) = line.trim().split_once(':') else { continue };
-        let Some((_, mapped)) = TOOLS.iter().find(|(k, _)| *k == name.trim().trim_matches('"')) else { continue };
+        let Some((name, on)) = line.trim().split_once(':') else {
+            continue;
+        };
+        let Some((_, mapped)) = TOOLS
+            .iter()
+            .find(|(k, _)| *k == name.trim().trim_matches('"'))
+        else {
+            continue;
+        };
         if on.trim() == "true" && !out.iter().any(|t| t == mapped) {
             out.push(mapped.to_string());
         }
@@ -144,7 +176,11 @@ fn tools(entry: &Entry, permission: Option<&Entry>) -> String {
 
 fn tier(model: &str) -> &'static str {
     let m = model.to_lowercase();
-    TIERS.iter().find(|t| m.contains(**t)).copied().unwrap_or("inherit")
+    TIERS
+        .iter()
+        .find(|t| m.contains(**t))
+        .copied()
+        .unwrap_or("inherit")
 }
 
 fn hue_name(r: f32, g: f32, b: f32) -> Option<&'static str> {
@@ -159,7 +195,9 @@ fn hue_name(r: f32, g: f32, b: f32) -> Option<&'static str> {
         _ => (r - g) / delta + 4.0,
     };
     let hue = sector * 60.0;
-    HUES.iter().find(|(bound, _)| hue < *bound).map(|(_, name)| *name)
+    HUES.iter()
+        .find(|(bound, _)| hue < *bound)
+        .map(|(_, name)| *name)
 }
 
 fn color(value: &str) -> Option<&'static str> {
@@ -179,10 +217,19 @@ fn assemble(front: &[String], body: &str) -> String {
 /// A Claude Code subagent file (`~/.claude/agents/<name>.md`) from an opencode agent file.
 pub fn agent(name: &str, text: &str) -> Result<String, String> {
     let (entries, body) = parse(text)?;
-    let mut front = vec![format!("name: {name}"), format!("description: {}", description(&entries)?)];
-    front.extend(get(&entries, "tools").map(|e| format!("tools: {}", tools(e, get(&entries, "permission")))));
+    let mut front = vec![
+        format!("name: {name}"),
+        format!("description: {}", description(&entries)?),
+    ];
+    front.extend(
+        get(&entries, "tools").map(|e| format!("tools: {}", tools(e, get(&entries, "permission")))),
+    );
     front.extend(get(&entries, "model").map(|e| format!("model: {}", tier(&scalar(&e.value)))));
-    front.extend(get(&entries, "color").and_then(|e| color(&e.value)).map(|c| format!("color: {c}")));
+    front.extend(
+        get(&entries, "color")
+            .and_then(|e| color(&e.value))
+            .map(|c| format!("color: {c}")),
+    );
     Ok(assemble(&front, body))
 }
 
@@ -197,8 +244,13 @@ pub fn command(text: &str) -> Result<String, String> {
     let Some(agent) = get(&entries, "agent").map(|e| scalar(&e.value)) else {
         return Ok(assemble(&front, body));
     };
-    let preface = format!("Delegate this to the `{agent}` subagent (Agent tool, subagent_type `{agent}`) and relay what it returns.\n\n");
-    Ok(assemble(&front, &format!("\n{preface}{}", body.trim_start())))
+    let preface = format!(
+        "Delegate this to the `{agent}` subagent (Agent tool, subagent_type `{agent}`) and relay what it returns.\n\n"
+    );
+    Ok(assemble(
+        &front,
+        &format!("\n{preface}{}", body.trim_start()),
+    ))
 }
 
 #[cfg(test)]
@@ -239,7 +291,18 @@ mod tests {
     fn parse_splits_keys_blocks_and_body() {
         let (entries, body) = parse(ORCH).unwrap();
         let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
-        assert_eq!(keys, ["description", "mode", "model", "steps", "tools", "permission", "color"]);
+        assert_eq!(
+            keys,
+            [
+                "description",
+                "mode",
+                "model",
+                "steps",
+                "tools",
+                "permission",
+                "color"
+            ]
+        );
         let tools = entries.iter().find(|e| e.key == "tools").unwrap();
         assert_eq!(tools.block.len(), 6);
         let perm = entries.iter().find(|e| e.key == "permission").unwrap();
@@ -254,16 +317,23 @@ mod tests {
         let out = agent("orchestrator", ORCH).unwrap();
         let f = front(&out);
         assert_eq!(line(&f, "name"), Some("orchestrator"));
-        assert_eq!(line(&f, "description"), Some("\"The agent you talk to: it sends tasks, then reports.\""));
+        assert_eq!(
+            line(&f, "description"),
+            Some("\"The agent you talk to: it sends tasks, then reports.\"")
+        );
         for gone in ["mode", "steps", "permission"] {
-            assert!(f.iter().all(|l| !l.starts_with(&format!("{gone}:"))), "{gone} kept: {f:?}");
+            assert!(
+                f.iter().all(|l| !l.starts_with(&format!("{gone}:"))),
+                "{gone} kept: {f:?}"
+            );
         }
         assert!(out.ends_with("\nBody line 1.\nBody `model: keep`.\n"));
     }
 
     #[test]
     fn agent_model_is_a_tier() {
-        let with = |m: &str| agent("x", &format!("---\ndescription: d\nmodel: {m}\n---\nb\n")).unwrap();
+        let with =
+            |m: &str| agent("x", &format!("---\ndescription: d\nmodel: {m}\n---\nb\n")).unwrap();
         for (model, tier) in [
             ("github-copilot/claude-haiku-5.5", "haiku"),
             ("github-copilot/claude-sonnet-5.5", "sonnet"),
@@ -281,31 +351,72 @@ mod tests {
     fn agent_tools_keep_only_enabled_ones_and_add_companions() {
         let f = front(&agent("orchestrator", ORCH).unwrap());
         let tools: Vec<&str> = line(&f, "tools").unwrap().split(", ").collect();
-        assert_eq!(&tools[..4], ["mcp__a2a__*", "Bash", "Read", "Agent(summarizer)"]);
-        assert!(tools.contains(&"mcp__engram__*") && tools.contains(&"mcp__codegraph__*") && tools.contains(&"mcp__context7__*"));
-        assert!(!tools.iter().any(|t| t.contains("playwright") || *t == "Write"), "{tools:?}");
+        assert_eq!(
+            &tools[..4],
+            ["mcp__a2a__*", "Bash", "Read", "Agent(summarizer)"]
+        );
+        assert!(
+            tools.contains(&"mcp__engram__*")
+                && tools.contains(&"mcp__codegraph__*")
+                && tools.contains(&"mcp__context7__*")
+        );
+        assert!(
+            !tools
+                .iter()
+                .any(|t| t.contains("playwright") || *t == "Write"),
+            "{tools:?}"
+        );
         let pw = agent("x", "---\ndescription: d\ntools:\n  \"playwright_*\": true\n  question: true\n  todowrite: true\n---\nb\n").unwrap();
         let t = line(&front(&pw), "tools").unwrap().to_string();
-        assert!(t.starts_with("mcp__playwright__*, AskUserQuestion, TodoWrite"), "{t}");
+        assert!(
+            t.starts_with("mcp__playwright__*, AskUserQuestion, TodoWrite"),
+            "{t}"
+        );
         let bare = agent("x", "---\ndescription: d\n---\nb\n").unwrap();
-        assert_eq!(line(&front(&bare), "tools"), None, "no tools map means inherit everything");
+        assert_eq!(
+            line(&front(&bare), "tools"),
+            None,
+            "no tools map means inherit everything"
+        );
     }
 
     #[test]
     fn task_permissions_become_an_agent_allow_list() {
-        let with = |perm: &str, tools: &str| agent("x", &format!("---\ndescription: d\ntools:\n{tools}permission:\n{perm}---\nb\n")).unwrap();
+        let with = |perm: &str, tools: &str| {
+            agent(
+                "x",
+                &format!("---\ndescription: d\ntools:\n{tools}permission:\n{perm}---\nb\n"),
+            )
+            .unwrap()
+        };
         let allow = "  task:\n    \"*\": deny\n    code-reviewer: allow\n    doc-lookup: allow\n    test-runner: deny\n";
         let t = |out: String| line(&front(&out), "tools").unwrap().to_string();
-        assert!(t(with(allow, "  read: true\n")).contains("Agent(code-reviewer, doc-lookup), "), "allow-list without the task tool");
-        assert!(t(with(allow, "  task: true\n")).starts_with("Agent(code-reviewer, doc-lookup), "), "replaces the plain Agent");
-        assert!(t(with("  task:\n    \"*\": allow\n", "  read: true\n")).starts_with("Agent, "), "everything allowed");
-        assert!(!t(with("  task:\n    \"*\": deny\n", "  read: true\n")).contains("Agent"), "nothing allowed");
-        assert!(!t(with("  edit:\n    \"*\": allow\n", "  read: true\n")).contains("Agent"), "only the task block counts");
+        assert!(
+            t(with(allow, "  read: true\n")).contains("Agent(code-reviewer, doc-lookup), "),
+            "allow-list without the task tool"
+        );
+        assert!(
+            t(with(allow, "  task: true\n")).starts_with("Agent(code-reviewer, doc-lookup), "),
+            "replaces the plain Agent"
+        );
+        assert!(
+            t(with("  task:\n    \"*\": allow\n", "  read: true\n")).starts_with("Agent, "),
+            "everything allowed"
+        );
+        assert!(
+            !t(with("  task:\n    \"*\": deny\n", "  read: true\n")).contains("Agent"),
+            "nothing allowed"
+        );
+        assert!(
+            !t(with("  edit:\n    \"*\": allow\n", "  read: true\n")).contains("Agent"),
+            "only the task block counts"
+        );
     }
 
     #[test]
     fn agent_color_is_a_claude_color_or_dropped() {
-        let with = |c: &str| agent("x", &format!("---\ndescription: d\ncolor: {c}\n---\nb\n")).unwrap();
+        let with =
+            |c: &str| agent("x", &format!("---\ndescription: d\ncolor: {c}\n---\nb\n")).unwrap();
         for (given, want) in [
             ("\"#bb9af7\"", Some("purple")),
             ("\"#2ac3de\"", Some("cyan")),
@@ -324,10 +435,16 @@ mod tests {
     #[test]
     fn description_already_quoted_is_not_double_quoted() {
         let out = agent("x", "---\ndescription: \"say \\\"hi\\\"\"\n---\nb\n").unwrap();
-        assert_eq!(line(&front(&out), "description"), Some("\"say \\\"hi\\\"\""));
+        assert_eq!(
+            line(&front(&out), "description"),
+            Some("\"say \\\"hi\\\"\"")
+        );
         let single = agent("x", "---\ndescription: 'it''s'\n---\nb\n").unwrap();
         assert_eq!(line(&front(&single), "description"), Some("\"it's\""));
-        assert!(agent("x", "---\nmode: primary\n---\nb\n").is_err(), "description is required");
+        assert!(
+            agent("x", "---\nmode: primary\n---\nb\n").is_err(),
+            "description is required"
+        );
     }
 
     #[test]
@@ -335,11 +452,18 @@ mod tests {
         let src = "---\ndescription: Start a plan: explore first.\nagent: plan\n---\n\nStart.\n\nArguments: `$ARGUMENTS`\n";
         let out = command(src).unwrap();
         let f = front(&out);
-        assert_eq!(line(&f, "description"), Some("\"Start a plan: explore first.\""));
+        assert_eq!(
+            line(&f, "description"),
+            Some("\"Start a plan: explore first.\"")
+        );
         assert_eq!(line(&f, "argument-hint"), Some("\"<arguments>\""));
         assert!(f.iter().all(|l| !l.starts_with("agent:")));
         let body = out.split("\n---\n").nth(1).unwrap();
-        assert!(body.trim_start().starts_with("Delegate this to the `plan` subagent"), "{body}");
+        assert!(
+            body.trim_start()
+                .starts_with("Delegate this to the `plan` subagent"),
+            "{body}"
+        );
         assert!(body.contains("Arguments: `$ARGUMENTS`"));
         let plain = command("---\ndescription: d\n---\nno args here\n").unwrap();
         assert_eq!(line(&front(&plain), "argument-hint"), None);
@@ -348,29 +472,65 @@ mod tests {
 
     #[test]
     fn every_embedded_agent_and_command_converts_to_valid_frontmatter() {
-        const COLORS: [&str; 8] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
-        const BUILTIN: [&str; 10] = ["Read", "Grep", "Glob", "Bash", "Write", "Edit", "WebFetch", "TodoWrite", "Agent", "AskUserQuestion"];
+        const COLORS: [&str; 8] = [
+            "red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan",
+        ];
+        const BUILTIN: [&str; 10] = [
+            "Read",
+            "Grep",
+            "Glob",
+            "Bash",
+            "Write",
+            "Edit",
+            "WebFetch",
+            "TodoWrite",
+            "Agent",
+            "AskUserQuestion",
+        ];
         let (mut agents, mut commands) = (0, 0);
         for file in crate::cli::AGENTS.files() {
             let name = file.path().file_stem().unwrap().to_str().unwrap();
-            let out = agent(name, file.contents_utf8().unwrap()).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let out = agent(name, file.contents_utf8().unwrap())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
             let f = front(&out);
             assert_eq!(line(&f, "name"), Some(name));
-            assert!(line(&f, "description").is_some_and(|d| d.starts_with('"') && d.ends_with('"')), "{name}");
-            assert!(["sonnet", "haiku", "opus", "inherit"].contains(&line(&f, "model").unwrap_or("inherit")), "{name}");
-            assert!(line(&f, "color").is_none_or(|c| COLORS.contains(&c)), "{name}");
+            assert!(
+                line(&f, "description").is_some_and(|d| d.starts_with('"') && d.ends_with('"')),
+                "{name}"
+            );
+            assert!(
+                ["sonnet", "haiku", "opus", "inherit"]
+                    .contains(&line(&f, "model").unwrap_or("inherit")),
+                "{name}"
+            );
+            assert!(
+                line(&f, "color").is_none_or(|c| COLORS.contains(&c)),
+                "{name}"
+            );
             for t in split_tools(line(&f, "tools").unwrap_or("Read")) {
                 let t = t.split('(').next().unwrap();
-                assert!(BUILTIN.contains(&t) || (t.starts_with("mcp__") && t.ends_with("__*")), "{name}: {t}");
+                assert!(
+                    BUILTIN.contains(&t) || (t.starts_with("mcp__") && t.ends_with("__*")),
+                    "{name}: {t}"
+                );
             }
-            assert!(f.iter().all(|l| !l.starts_with("mode:") && !l.starts_with("permission:") && !l.starts_with("steps:")), "{name}");
+            assert!(
+                f.iter().all(|l| !l.starts_with("mode:")
+                    && !l.starts_with("permission:")
+                    && !l.starts_with("steps:")),
+                "{name}"
+            );
             agents += 1;
         }
         for file in crate::cli::COMMANDS.files() {
-            let out = command(file.contents_utf8().unwrap()).unwrap_or_else(|e| panic!("{:?}: {e}", file.path()));
+            let out = command(file.contents_utf8().unwrap())
+                .unwrap_or_else(|e| panic!("{:?}: {e}", file.path()));
             assert!(line(&front(&out), "description").is_some());
             commands += 1;
         }
-        assert!(agents >= 21 && commands >= 3, "{agents} agents, {commands} commands");
+        assert!(
+            agents >= 21 && commands >= 3,
+            "{agents} agents, {commands} commands"
+        );
     }
 }

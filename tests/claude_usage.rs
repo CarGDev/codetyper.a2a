@@ -10,11 +10,15 @@ fn tmp(name: &str) -> PathBuf {
 }
 
 fn assistant(id: &str, model: &str, usage: &str) -> String {
-    format!(r#"{{"type":"assistant","uuid":"u-{id}","sessionId":"sess-1","timestamp":"2026-10-24T04:03:47.960Z","message":{{"id":"{id}","model":"{model}","usage":{usage}}}}}"#)
+    format!(
+        r#"{{"type":"assistant","uuid":"u-{id}","sessionId":"sess-1","timestamp":"2026-10-24T04:03:47.960Z","message":{{"id":"{id}","model":"{model}","usage":{usage}}}}}"#
+    )
 }
 
 fn usage(i: i64, cc: i64, cr: i64, o: i64) -> String {
-    format!(r#"{{"input_tokens":{i},"cache_creation_input_tokens":{cc},"cache_read_input_tokens":{cr},"output_tokens":{o}}}"#)
+    format!(
+        r#"{{"input_tokens":{i},"cache_creation_input_tokens":{cc},"cache_read_input_tokens":{cr},"output_tokens":{o}}}"#
+    )
 }
 
 fn oc(dir: &Path, args: &[&str]) -> (String, String, bool) {
@@ -30,7 +34,11 @@ fn oc(dir: &Path, args: &[&str]) -> (String, String, bool) {
         .env_remove("TMUX_PANE")
         .output()
         .unwrap();
-    (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.success())
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
 }
 
 fn write_transcript(dir: &Path, rel: &str, body: &str) -> PathBuf {
@@ -40,10 +48,24 @@ fn write_transcript(dir: &Path, rel: &str, body: &str) -> PathBuf {
     p
 }
 
-fn rows(dir: &Path) -> Vec<(String, i64, i64, Option<f64>)> {
+type Row = (String, i64, i64, Option<f64>, Option<i64>, Option<i64>);
+
+fn rows(dir: &Path) -> Vec<Row> {
     let c = rusqlite::Connection::open(dir.join("hub.db")).unwrap();
-    let mut st = c.prepare("SELECT model, tokens_in, tokens_out, cost_usd FROM events WHERE source = 'claude-code' ORDER BY ref").unwrap();
-    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().flatten().collect()
+    let mut st = c.prepare("SELECT model, tokens_in, tokens_out, cost_usd, tokens_cache_read, tokens_cache_write FROM events WHERE source = 'claude-code' ORDER BY ref").unwrap();
+    st.query_map([], |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
+    })
+    .unwrap()
+    .flatten()
+    .collect()
 }
 
 #[test]
@@ -63,9 +85,20 @@ fn ingest_counts_each_message_id_once_and_skips_what_is_not_usage() {
     assert!(ok && out.contains("2 new usage rows"), "{out}{err}");
     let got = rows(&dir);
     assert_eq!(got.len(), 2, "{got:?}");
-    assert_eq!((got[0].0.as_str(), got[0].1, got[0].2), ("claude-sonnet-5-5", 112, 7), "in = input + cache creation + cache read");
-    assert!(got[0].3.is_some(), "claude-sonnet-5-5 is in the price table");
-    assert_eq!((got[1].0.as_str(), got[1].3), ("claude-future-1", None), "no invented price");
+    assert_eq!(
+        (got[0].0.as_str(), got[0].1, got[0].2, got[0].4, got[0].5),
+        ("claude-sonnet-5-5", 2, 7, Some(10), Some(100)),
+        "in is the non-cached input; cache has its own columns"
+    );
+    assert!(
+        got[0].3.is_some(),
+        "claude-sonnet-5-5 is in the price table"
+    );
+    assert_eq!(
+        (got[1].0.as_str(), got[1].3),
+        ("claude-future-1", None),
+        "no invented price"
+    );
     let (out, _, _) = oc(&dir, &["stats", "--ingest"]);
     assert!(out.contains("0 new usage rows"), "{out}");
     assert_eq!(rows(&dir).len(), 2);
@@ -79,10 +112,17 @@ fn a_truncated_last_line_waits_for_its_newline_and_nested_transcripts_are_read()
     let next = assistant("m2", "claude-sonnet-5-5", &usage(2, 0, 0, 2));
     let (head, tail) = next.split_at(next.len() / 2);
     let path = write_transcript(&dir, "-proj/sess-1.jsonl", &format!("{whole}\n{head}"));
-    write_transcript(&dir, "-proj/sess-1/subagents/agent-a.jsonl", &(assistant("s1", "claude-sonnet-5-5", &usage(3, 0, 0, 3)) + "\n"));
+    write_transcript(
+        &dir,
+        "-proj/sess-1/subagents/agent-a.jsonl",
+        &(assistant("s1", "claude-sonnet-5-5", &usage(3, 0, 0, 3)) + "\n"),
+    );
     let (out, err, ok) = oc(&dir, &["stats", "--ingest"]);
     assert!(ok && out.contains("2 new usage rows"), "{out}{err}");
-    let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
     std::io::Write::write_all(&mut f, format!("{tail}\n").as_bytes()).unwrap();
     let (out, _, _) = oc(&dir, &["stats", "--ingest"]);
     assert!(out.contains("1 new usage rows"), "{out}");
@@ -93,11 +133,30 @@ fn a_truncated_last_line_waits_for_its_newline_and_nested_transcripts_are_read()
 #[test]
 fn stats_model_shows_one_table_per_source_and_a_broken_claude_dir_never_breaks_it() {
     let dir = tmp("render");
-    write_transcript(&dir, "-proj/sess-1.jsonl", &(assistant("m1", "claude-sonnet-5-5", &usage(2, 100, 10, 5)) + "\n"));
+    write_transcript(
+        &dir,
+        "-proj/sess-1.jsonl",
+        &(assistant("m1", "claude-sonnet-5-5", &usage(2, 100, 10, 5)) + "\n"),
+    );
+    let (ingested, err, ok) = oc(&dir, &["stats", "--ingest"]);
+    assert!(
+        ok && ingested.contains("1 new usage rows"),
+        "{ingested}{err}"
+    );
     let (out, err, ok) = oc(&dir, &["stats", "--model"]);
     assert!(ok, "{out}{err}");
-    assert!(out.contains("claude code") && out.contains("claude-sonnet-5-5") && !out.contains("opencode\n"), "{out}");
-    assert!(out.contains("include cache"), "{out}");
+    assert!(
+        out.contains("claude code")
+            && out.contains("claude-sonnet-5-5")
+            && !out.contains("opencode\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("cache r/w")
+            && out.contains("sessions")
+            && out.contains("cached tokens are listed apart"),
+        "{out}"
+    );
     assert_eq!(rows(&dir).len(), 1);
     let (again, _, _) = oc(&dir, &["stats", "--model"]);
     assert_eq!(again, out, "a second run changes nothing");
@@ -106,6 +165,9 @@ fn stats_model_shows_one_table_per_source_and_a_broken_claude_dir_never_breaks_i
     std::fs::write(dir.join("claude"), "a file, not a dir").unwrap();
     let (out, err, ok) = oc(&dir, &["stats", "--model"]);
     assert!(ok, "{out}{err}");
-    assert!(out.contains("claude-sonnet-5-5"), "rows already stored still render: {out}");
+    assert!(
+        out.contains("claude-sonnet-5-5"),
+        "rows already stored still render: {out}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

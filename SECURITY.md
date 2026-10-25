@@ -7,7 +7,7 @@ Security fixes go into the latest release. Older releases are not patched; upgra
 
 | Version | Supported |
 | ------- | --------- |
-| latest release (currently 2.0.x) | yes |
+| latest release (currently 2.1.x) | yes |
 | older releases (1.x and earlier) | no |
 
 ## Reporting a vulnerability

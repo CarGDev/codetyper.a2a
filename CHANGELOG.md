@@ -6,12 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [2.0.0] - 2026-10-24
+## [2.1.0] - 2026-10-24
 
-The major version is for one breaking change: `codetypera2a init` is no longer opencode-only (see Changed).
+Claude Code becomes a full runtime for the hub: its agents are woken by the dispatcher, its usage and messages are
+visible, and `init` sets everything up in one command.
 
 ### Added
 
+- **Ollama models in opencode.** `init` (opencode) probes the local Ollama, `$OLLAMA_HOST` and every
+  `--ollama-url <url>` host (remembered in `<config>/a2a/ollama.json`) with read-only `GET /api/tags` and
+  `POST /api/show`, and writes one provider per host (`ollama`, `ollama-<host>`) into `opencode.jsonc`: only
+  tool-capable models, embedding models are listed but not added. Idempotent, user edits kept, backup
+  `opencode.jsonc.bak-a2a-ollama`, an unreachable host is one line, `--no-ollama` skips it.
+- **Claude Code starts on the orchestrator.** `init` (plain or `--claude`) sets `"agent": "orchestrator"` in
+  `<claude dir>/settings.json` when there is no `agent` key and the orchestrator agent is installed; another agent you
+  chose is kept with a note, a rerun changes nothing, `init --no-default-agent` skips it.
 - **A2A pane for Claude Code.** `oc messages --json [--since <iso>] [--limit N]` prints the latest task messages
   (task, from, to, state, text, ts), newest first and read-only. The mod `a2a-pane` (`plugins/claude-a2a/`) polls it
   with `oc status --json` and draws a pane beside the chat (dispatcher dot, tasks coloured by state with
@@ -49,9 +58,37 @@ The major version is for one breaking change: `codetypera2a init` is no longer o
   (`src/launcher/claude_usage.rs`) reads the Claude Code transcripts under `$CLAUDE_CONFIG_DIR` or `~/.claude`
   (subagent transcripts too), one usage event per message id (the largest output wins when a message is streamed
   over several lines), from the byte offset where the last run stopped, tolerating bad JSON, a half-written last
-  line and vanished files. Tokens in are input + cache creation + cache read; cost uses the price table and stays
-  blank for unlisted models. `oc stats --model` runs it first (a failure is a warning on stderr) and
+  line and vanished files. The `claude code` table lists `in` (non-cached input), `out` and `cache r/w`
+  separately, as Claude Code's `/usage` does (schema v6 adds `events.tokens_cache_read`/`tokens_cache_write`; backup
+  `<db>.bak-v5`; the derived `claude-code` rows of v4/v5 are dropped and rebuilt from the transcripts on the next
+  ingest). Cost is an estimate that prices cache reads at 0.1x and 5-minute / 1-hour cache writes at 1.25x / 2x of the
+  input price (transcript `cache_creation` split), and stays blank for unlisted models; the `tasks` column of this
+  table is `sessions`. Transcripts do not hold every call Claude Code bills (for example side queries), so figures can
+  be lower than `/usage`. `oc stats --model` runs it first (a failure is a warning on stderr) and
   `oc stats --ingest` runs only it and prints the new rows.
+- **Claude Code footer status line.** `init --claude` also adds a `statusLine` and `SubagentStart` / `SubagentStop`
+  hooks to `settings.json` (only when absent, backup `settings.json.bak-a2a`, reruns change nothing). `oc statusline`
+  prints one line: dispatcher up/down, open hub tasks (from>to) and the subagents Claude Code is running, tracked by
+  `oc statusline --hook start|stop` in `<config>/a2a/statusline-subagents/` (`A2A_STATUSLINE_DIR` overrides; entries
+  older than 10 minutes are ignored). It reads the hub read-only and always exits 0. Code: `src/launcher/statusline.rs`,
+  `src/targets/settings.rs`.
+
+### Known limits (Claude Code)
+
+- An interactive Claude Code session is never woken by the dispatcher (a headless `claude -p` cannot inject into it).
+  It gets results on its next prompt through the `UserPromptSubmit` hook and the `N results waiting` footer, so an
+  orchestrator that must react the moment a task finishes still works best in opencode.
+- Agents run on Claude only when you route them there (`DISPATCH_BACKEND` / `DISPATCH_BACKEND_<AGENT>`); the default
+  stays opencode.
+- The `plan` agent and the `/plan-*` commands still look for plans in `.opencode/plans/`.
+- Claude Code cost in `oc stats` is an estimate from the repo's price table (blank for models it does not list).
+
+## [2.0.0] - 2026-10-24
+
+The major version is for one breaking change: `codetypera2a init` is no longer opencode-only (see Changed).
+
+### Added
+
 - **Claude Code as an install target.** `codetypera2a init --claude` converts the embedded agent and slash-command
   templates to Claude Code's format and installs them into `~/.claude` (21 agents in `agents/`, 3 commands in
   `commands/`), then registers the MCP servers `a2a`, `codegraph`, `context7`, `engram` and `playwright` in the
@@ -65,12 +102,6 @@ The major version is for one breaking change: `codetypera2a init` is no longer o
   set up yet are listed as "coming soon": Codex CLI, Cursor, Gemini CLI, Kiro, VS Code Copilot Chat). New flags
   `--claude`, `--opencode`, `--all` and `--yes` skip the screen. Code lives in `src/targets/` (`mod.rs`,
   `convert.rs`, `claude.rs`, `picker.rs`).
-- **Claude Code footer status line.** `init --claude` also adds a `statusLine` and `SubagentStart` / `SubagentStop`
-  hooks to `settings.json` (only when absent, backup `settings.json.bak-a2a`, reruns change nothing). `oc statusline`
-  prints one line: dispatcher up/down, open hub tasks (from>to) and the subagents Claude Code is running, tracked by
-  `oc statusline --hook start|stop` in `<config>/a2a/statusline-subagents/` (`A2A_STATUSLINE_DIR` overrides; entries
-  older than 10 minutes are ignored). It reads the hub read-only and always exits 0. Code: `src/launcher/statusline.rs`,
-  `src/targets/settings.rs`.
 - `oc stats --model` (also `--models`): the usage table per model instead of per agent, with tokens in/out, a share
   bar, cost, turns, tasks and agents that used each model. Events without a model are grouped as `unknown`. Plain
   `oc stats` is unchanged.
@@ -93,15 +124,13 @@ The major version is for one breaking change: `codetypera2a init` is no longer o
   `tools:`, because Claude Code gives an agent only the tools it lists.
 - `help` and the README describe both tools.
 
-### Known limits (Claude Code)
+### Not ported yet
 
-- An interactive Claude Code session is never woken by the dispatcher (a headless `claude -p` cannot inject into it).
-  It gets results on its next prompt through the `UserPromptSubmit` hook and the `N results waiting` footer, so an
-  orchestrator that must react the moment a task finishes still works best in opencode.
-- Agents run on Claude only when you route them there (`DISPATCH_BACKEND` / `DISPATCH_BACKEND_<AGENT>`); the default
-  stays opencode.
-- The `plan` agent and the `/plan-*` commands still look for plans in `.opencode/plans/`.
-- Claude Code cost in `oc stats` is an estimate from the repo's price table (blank for models it does not list).
+- The dispatcher still wakes opencode sessions only. Agents that send a task and wait for the result (the
+  `orchestrator`, `brain`) install for Claude Code but only work fully with opencode for now; Claude Code can
+  already call the hub's `a2a_*` tools (as `mcp__a2a__*`).
+- The live status UI (tabs plugin, `a2a-status` panel) has no Claude Code version yet; `oc status` and `oc watch`
+  still work from a shell. Both are planned for the next phase.
 
 ## [1.4.0] - 2026-10-23
 

@@ -13,7 +13,7 @@
 
 <p>
 <a href="https://github.com/CarGDev/codetyper.a2a/releases"><img src="https://img.shields.io/github/v/release/CarGDev/codetyper.a2a?style=for-the-badge&label=release" alt="Latest release"></a>
-<img src="https://img.shields.io/badge/version-2.0.0-2ac3de?style=for-the-badge" alt="Version 2.0.0">
+<img src="https://img.shields.io/badge/version-2.1.0-2ac3de?style=for-the-badge" alt="Version 2.1.0">
 <img src="https://img.shields.io/badge/Rust-1.85%2B-f74c00?style=for-the-badge&logo=rust&logoColor=white" alt="Rust 1.85+">
 <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-7aa2f7?style=for-the-badge" alt="Platform">
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge" alt="License: Apache 2.0"></a>
@@ -79,7 +79,7 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 | `oc shutdown`          | end everything: cancel open tasks, interrupt running turns, retire sessions, stop the dispatcher (runs automatically when the last opencode exits; `A2A_KEEP_RUNNING=1` disables) |
 | `oc cancel`            | cancel open tasks (`--all`, task ids, `--context`, `--dir`) and interrupt the turns working on them |
 | `oc stats`             | coloured per-agent table, most tokens first, with a share bar: tasks, average duration (`3m 46s`), tokens in/out (`1.3M/13.1k`) and cost (opencode's figure, or an estimate from the price table when it reports 0); unknown values stay blank |
-| `oc stats --model`     | the same table per model, one titled table per tool (`opencode`, `claude code`), each with its own total (read from the `events.model` / `events.source` columns of the hub database, schema v4): tokens in/out, share bar, cost, turns, tasks and agents that used it; opencode events without a recorded model are grouped as `unknown`. It first reads new Claude Code transcripts (`$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/**/*.jsonl`) into the hub, once per message id, so reruns add nothing; tokens in include cache reads and writes, `tasks` are sessions and Claude Code cost is an estimate from the price table (blank for models it does not list). A transcript that cannot be read only prints a warning |
+| `oc stats --model`     | the same table per model, one titled table per tool (`opencode`, `claude code`), each with its own total (read from the `events.model` / `events.source` columns of the hub database, schema v6): tokens in/out, share bar, cost, turns, tasks and agents that used it; opencode events without a recorded model are grouped as `unknown`. It first reads new Claude Code transcripts (`$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/**/*.jsonl`) into the hub, once per message id, so reruns add nothing; the `claude code` table shows `in` (non-cached input), `out` and `cache r/w` apart, with `sessions` instead of `tasks` (schema v6), and its cost is an estimate that prices cache reads at 0.1x and cache writes at 1.25x (5 minutes) / 2x (1 hour) of the input price, blank for models the price table does not list. Transcripts omit some calls Claude Code bills (side queries), so totals can sit below `/usage`. A transcript that cannot be read only prints a warning |
 | `oc stats --ingest`    | only the transcript step above: prints how many new `claude code` usage rows were added |
 | `oc status --json`     | the same state as JSON (tasks, questions, progress, today's cost); `--dir <folder>` |
 | `oc messages --json`   | recent task messages as JSON, newest first (`--since <iso>`, `--limit N`); what the Claude Code pane reads |
@@ -188,7 +188,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 2.0.0
+codetypera2a --version        # codetypera2a 2.1.0
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
@@ -291,9 +291,14 @@ transcripts (the dispatcher does not record them, so nothing is counted twice). 
 The `UserPromptSubmit` hook (`oc statusline --hook inbox`) adds the finished results to your next prompt in an
 interactive Claude Code session and marks them seen; set `A2A_REQUESTER` if your requester is not `orchestrator`.
 
-Check it: `claude agents` lists the agents, `claude mcp list` shows `a2a`, and
-`claude --agent orchestrator` starts on the orchestrator. Every agent also works as a subagent of any
-Claude Code session.
+Claude Code starts on the orchestrator by itself: `init` writes `"agent": "orchestrator"` to
+`<claude dir>/settings.json` (user scope, every project) when the file has no `agent` key and
+`agents/orchestrator.md` is installed. An `agent` you already set is kept (init prints a note); a project's
+`.claude/settings.json` or `claude --agent <name>` still wins. `init --no-default-agent` skips it; to undo it,
+delete the `agent` line (the original file is saved as `settings.json.bak-a2a`).
+
+Check it: `claude mcp list` shows `a2a`, and a new `claude` session opens on the orchestrator (its stream-json
+init event lists only the orchestrator's tools). Every agent also works as a subagent of any Claude Code session.
 
 Known limits:
 
@@ -350,6 +355,31 @@ dispatcher start.
 | context7   | remote server, nothing to install (optional API key + skill: `npx ctx7 setup --opencode`)   |
 | playwright | needs Node (`npx`)                                                                           |
 
+### Ollama models (opencode)
+
+`init` looks for Ollama models and adds them to `opencode.jsonc` as providers, so they show in `opencode models` and in
+`codetypera2a models`:
+
+```sh
+codetypera2a init --opencode --ollama-url http://100.99.194.92   # also check this host (repeatable)
+codetypera2a init --no-ollama                                    # skip the discovery
+```
+
+- Checked on every `init`: the local Ollama (`http://127.0.0.1:11434`), `$OLLAMA_HOST`, and every host given with
+  `--ollama-url`. Hosts from the flag are remembered in `<config>/a2a/ollama.json`, so later runs re-check them without
+  the flag. A URL without a port is tried as given, then on `:11434`.
+- Only read-only calls are made: `GET /api/tags` and `POST /api/show` (the model name), with a 2 s connect and 5 s total
+  timeout. An unreachable host is one line in the output; `init` goes on. `curl` must be on `PATH`.
+- Each host becomes one provider: `ollama` for this machine, `ollama-<host>` for the rest (for example
+  `ollama-100-99-194-92`), with `@ai-sdk/openai-compatible`, `options.baseURL = <host>/v1`, zero cost and the context
+  length from `/api/show`. Only models that report the `tools` capability are added (agents need tool calls); embedding
+  models are listed in the output but not added.
+- Safe edits: existing provider entries and models you edited are kept (missing models are added), a changed file is first
+  copied to `opencode.jsonc.bak-a2a-ollama`, a second run changes nothing, and a file with comments is not rewritten (the
+  snippet is printed). `init --md-only` / `update` never touch `opencode.jsonc`.
+- Claude Code cannot take arbitrary providers, so this is opencode only. Check the provider with
+  `opencode models --standalone | grep ollama`.
+
 ### Uninstall
 
 ```sh
@@ -391,6 +421,7 @@ src/launcher/    `oc`
 src/targets/     install targets: mod.rs (Claude Code, opencode, coming-soon list, detection),
                  convert.rs (opencode agent/command markdown to Claude Code), claude.rs (installer),
                  settings.rs (status line and hooks), picker.rs (the `init` selection screen)
+src/ollama.rs    Ollama discovery and the opencode provider entries `init` writes
 src/stats_view.rs  `oc stats` and `oc stats --model` tables
 ```
 

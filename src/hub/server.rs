@@ -5,16 +5,78 @@
 //! AgentCard registry, Task lifecycle, Messages made of Parts, Artifacts, contextId grouping,
 //! send/get/list/cancel. Delivery is pull-based (agents poll inbox); no push exists between
 //! sessions. State lives in the shared SQLite file (WAL), see `hub::db`.
-use super::db::{self, STATES, TERMINAL, TaskRow, now};
+use super::db::{self, now, TaskRow, STATES, TERMINAL};
 use super::project::same_project;
+use crate::dispatcher::resolver::{
+    self, BackendKind, CallerIdentity, Resolution, ResolutionSource, ResolveInput,
+};
 use regex::Regex;
-use rusqlite::{Connection, params};
-use serde_json::{Map, Value, json};
+use rusqlite::{params, Connection};
+use serde_json::{json, Map, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;
 use uuid::Uuid;
 
 type Args = Map<String, Value>;
+
+fn backend_var(agent: &str) -> String {
+    agent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn configured_backends(agent: &str) -> (Option<String>, Option<String>) {
+    let per = std::env::var(format!("DISPATCH_BACKEND_{}", backend_var(agent))).ok();
+    let global = std::env::var("DISPATCH_BACKEND").ok();
+    (per, global)
+}
+
+fn stored_context_backend(metadata: Option<&str>) -> Option<Option<&'static str>> {
+    let value = metadata.and_then(|m| serde_json::from_str::<Value>(m).ok())?;
+    let backend = value.get("routing")?.get("backend")?.as_str()?;
+    match backend {
+        "opencode" => Some(None),
+        "claude" => Some(Some("claude")),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExplicitBackend {
+    Missing,
+    Valid(BackendKind),
+    Invalid,
+}
+
+fn explicit_resolution(backend: ExplicitBackend, session: &str) -> Resolution {
+    match backend {
+        ExplicitBackend::Valid(backend) => Resolution {
+            backend,
+            source: ResolutionSource::Stored,
+            caller_session: Some(session.to_owned()),
+            diagnostic: "explicit session backend".into(),
+        },
+        ExplicitBackend::Missing => Resolution {
+            backend: BackendKind::Opencode,
+            source: ResolutionSource::SafeDefault,
+            caller_session: Some(session.to_owned()),
+            diagnostic: "explicit session unregistered; safe default".into(),
+        },
+        ExplicitBackend::Invalid => Resolution {
+            backend: BackendKind::Opencode,
+            source: ResolutionSource::SafeDefault,
+            caller_session: Some(session.to_owned()),
+            diagnostic: "explicit session backend invalid; safe default".into(),
+        },
+    }
+}
 
 fn uuid() -> String {
     Uuid::new_v4().to_string()
@@ -39,7 +101,9 @@ fn num(a: &Args, k: &str) -> Option<f64> {
 }
 
 fn limit(a: &Args) -> i64 {
-    let n = num(a, "limit").filter(|n| *n != 0.0 && !n.is_nan()).unwrap_or(20.0);
+    let n = num(a, "limit")
+        .filter(|n| *n != 0.0 && !n.is_nan())
+        .unwrap_or(20.0);
     n.clamp(1.0, 100.0) as i64
 }
 
@@ -58,7 +122,11 @@ fn to_parts(a: &Args) -> Vec<Value> {
     if let Some(Value::Array(p)) = a.get("parts") {
         out.extend(p.iter().cloned());
     }
-    if let Some(t) = a.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+    if let Some(t) = a
+        .get("text")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+    {
         out.push(json!({ "text": t }));
     }
     if let Some(d) = a.get("data").filter(|d| !d.is_null()) {
@@ -127,16 +195,32 @@ pub struct Hub {
 
 impl Hub {
     pub fn open(db_path: &Path, agent_dir: &Path) -> Result<Self, String> {
-        let conn = db::open(db_path)?;
-        seed_agent_cards(&conn, agent_dir);
+        let live_legacy = std::env::var_os("A2A_DB").is_none()
+            && crate::paths::resolve_runtime_home(
+                &crate::paths::runtime_home(),
+                &crate::paths::legacy_home(),
+            )
+            .legacy;
+        let conn = if live_legacy {
+            db::open_read_compat(db_path)?.0
+        } else {
+            db::open(db_path)?
+        };
+        if !live_legacy {
+            seed_agent_cards(&conn, agent_dir);
+        }
         Ok(Hub { conn })
     }
 
     fn tx<T>(&self, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-        self.conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| e.to_string())?;
         match f() {
             Ok(v) => {
-                self.conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+                self.conn
+                    .execute_batch("COMMIT")
+                    .map_err(|e| e.to_string())?;
                 Ok(v)
             }
             Err(e) => {
@@ -154,12 +238,52 @@ impl Hub {
         r.map_err(|e| e.to_string())
     }
 
+    /// Explicit caller sessions are authoritative. NULL is the legacy OpenCode backend.
+    fn explicit_backend(
+        &self,
+        agent: &str,
+        session: &str,
+        directory: Option<&str>,
+    ) -> Result<ExplicitBackend, String> {
+        // Session ids are only unique within an agent/project; without a caller directory any row
+        // could belong to another project, so never guess.
+        let Some(directory) = directory else {
+            return Ok(ExplicitBackend::Missing);
+        };
+        let rows = db::sessions(
+            &self.conn,
+            "WHERE session_id = ? AND agent = ? AND status = 'live' ORDER BY created_at DESC",
+            &[session, agent],
+        )?;
+        let Some(row) = rows
+            .into_iter()
+            .find(|row| directory == row.directory || same_project(directory, &row.directory))
+        else {
+            return Ok(ExplicitBackend::Missing);
+        };
+        Ok(match row.backend.as_deref() {
+            None => ExplicitBackend::Valid(BackendKind::Opencode),
+            Some(name) => BackendKind::from_name(name)
+                .map_or(ExplicitBackend::Invalid, ExplicitBackend::Valid),
+        })
+    }
+
     /// Dispatch a tool call; `None` means the tool does not exist.
     pub fn call(&self, name: &str, a: &Args) -> Option<Result<Value, String>> {
+        self.call_with_identity(name, a, &CallerIdentity::Unknown)
+    }
+
+    /// Internal transport boundary: identity is supplied from MCP metadata, never tool arguments.
+    fn call_with_identity(
+        &self,
+        name: &str,
+        a: &Args,
+        identity: &CallerIdentity,
+    ) -> Option<Result<Value, String>> {
         Some(match name {
             "register_agent" => self.register_agent(a),
             "list_agents" => self.list_agents(a),
-            "send_message" => self.send_message(a),
+            "send_message" => self.send_message(a, identity),
             "inbox" => self.inbox(a),
             "get_task" => self.get_task(a),
             "list_tasks" => self.list_tasks(a),
@@ -200,7 +324,9 @@ impl Hub {
     }
 
     fn list_agents(&self, a: &Args) -> Result<Value, String> {
-        let mut st = Self::db_err(self.conn.prepare("SELECT card FROM agents WHERE card != '{}' AND status = 'active' ORDER BY name"))?;
+        let mut st = Self::db_err(self.conn.prepare(
+            "SELECT card FROM agents WHERE card != '{}' AND status = 'active' ORDER BY name",
+        ))?;
         let mut cards: Vec<Value> = Self::db_err(st.query_map([], |r| r.get::<_, String>(0)))?
             .flatten()
             .map(|c| parse(&c))
@@ -234,7 +360,7 @@ impl Hub {
         Ok(json!({ "agents": cards }))
     }
 
-    fn send_message(&self, a: &Args) -> Result<Value, String> {
+    fn send_message(&self, a: &Args, identity: &CallerIdentity) -> Result<Value, String> {
         let from = need(a, "from")?;
         let p = to_parts(a);
         if p.is_empty() {
@@ -290,17 +416,44 @@ impl Hub {
                 ],
             );
             let ctx = s(a, "contextId").map(String::from).unwrap_or_else(uuid);
-            // Route results back to the opencode session this call comes from.
-            let session = s(a, "sessionId").map(String::from).or_else(|| {
+            // Explicit sessionId is authoritative; otherwise retain the existing OpenCode detection.
+            let explicit_session = s(a, "sessionId");
+            let detected_session = explicit_session.is_none().then(|| {
                 let own = s(a, "fromDirectory").or(s(a, "directory")).map(String::from).or_else(|| {
                     std::env::current_dir().ok().map(|d| d.display().to_string())
                 })?;
                 crate::opencode::detect(&own, from)
-            });
+            }).flatten();
             for ag in [from, to] {
                 Self::db_err(db::ensure_agent(&self.conn, ag))?;
             }
             Self::db_err(db::ensure_context(&self.conn, &ctx))?;
+            let context_metadata: Option<String> = self.conn.query_row(
+                "SELECT metadata FROM contexts WHERE id = ?", [&ctx], |r| r.get(0)
+            ).ok().flatten();
+            let (per_agent, global) = configured_backends(from);
+            let resolution = match explicit_session {
+                Some(session) => explicit_resolution(
+                    self.explicit_backend(from, session, s(a, "fromDirectory").or(s(a, "directory")))?,
+                    session,
+                ),
+                None => resolver::resolve_backend(ResolveInput {
+                    agent: from,
+                    per_agent: per_agent.as_deref(),
+                    global: global.as_deref(),
+                    stored: stored_context_backend(context_metadata.as_deref()),
+                    explicit_session: None,
+                    identity,
+                    detected_opencode_session: detected_session.as_deref(),
+                    claude_available: true,
+                }),
+            };
+            let session = resolution.caller_session.clone();
+            let mut metadata = context_metadata.and_then(|m| serde_json::from_str::<Value>(&m).ok()).unwrap_or_else(|| json!({}));
+            if metadata.get("routing").and_then(|r| r.get("backend")) != Some(&json!(resolution.backend.name())) {
+                metadata["routing"] = json!({ "backend": resolution.backend.name(), "source": resolution.source.label(), "diagnostic": resolution.diagnostic });
+                Self::db_err(self.conn.execute("UPDATE contexts SET metadata=?, updated_at=? WHERE id=?", params![metadata.to_string(), ts, ctx]))?;
+            }
             // the first referenced task that exists becomes the parent (lineage)
             let parent = a
                 .get("referenceTaskIds")
@@ -376,15 +529,30 @@ impl Hub {
     fn list_tasks(&self, a: &Args) -> Result<Value, String> {
         let mut clauses = Vec::new();
         let mut args: Vec<&str> = Vec::new();
-        for (key, col) in [("contextId", "context_id"), ("state", "state"), ("from", "from_agent"), ("to", "to_agent")] {
+        for (key, col) in [
+            ("contextId", "context_id"),
+            ("state", "state"),
+            ("from", "from_agent"),
+            ("to", "to_agent"),
+        ] {
             if let Some(v) = s(a, key) {
                 clauses.push(format!("{col} = ?"));
                 args.push(v);
             }
         }
-        let wh = if clauses.is_empty() { String::new() } else { format!("WHERE {} ", clauses.join(" AND ")) };
-        let rows = db::tasks(&self.conn, &format!("{wh}ORDER BY updated_at DESC LIMIT {}", limit(a)), &args)?;
-        Ok(json!({ "count": rows.len(), "tasks": rows.iter().map(|r| row_to_task(r, 1)).collect::<Vec<_>>() }))
+        let wh = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
+        let rows = db::tasks(
+            &self.conn,
+            &format!("{wh}ORDER BY updated_at DESC LIMIT {}", limit(a)),
+            &args,
+        )?;
+        Ok(
+            json!({ "count": rows.len(), "tasks": rows.iter().map(|r| row_to_task(r, 1)).collect::<Vec<_>>() }),
+        )
     }
 
     fn update_task(&self, a: &Args) -> Result<Value, String> {
@@ -393,7 +561,10 @@ impl Hub {
         let state = s(a, "state");
         if let Some(st) = state {
             if !STATES.contains(&st) {
-                return Err(format!("invalid state '{st}'; use one of {}", STATES.join(", ")));
+                return Err(format!(
+                    "invalid state '{st}'; use one of {}",
+                    STATES.join(", ")
+                ));
             }
         }
         self.tx(|| {
@@ -512,7 +683,9 @@ impl Hub {
 
 /// Every `agent/*.md` becomes an AgentCard (description + mode from the frontmatter).
 fn seed_agent_cards(conn: &Connection, dir: &Path) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let fence = Regex::new(r"(?m)^---\s*$").unwrap();
     let desc_re = Regex::new(r"(?m)^description:\s*(.*)$").unwrap();
     let mode_re = Regex::new(r"(?m)^mode:\s*(.*)$").unwrap();
@@ -528,7 +701,11 @@ fn seed_agent_cards(conn: &Connection, dir: &Path) {
     for (name, path) in names {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let head = fence.split(&text).nth(1).unwrap_or("");
-        let cap = |re: &Regex| re.captures(head).map(|c| c[1].to_string()).unwrap_or_default();
+        let cap = |re: &Regex| {
+            re.captures(head)
+                .map(|c| c[1].to_string())
+                .unwrap_or_default()
+        };
         let description = quotes.replace_all(&cap(&desc_re), "").into_owned();
         let card = json!({
             "name": name, "description": description, "mode": cap(&mode_re).trim(),
@@ -644,12 +821,20 @@ fn tools() -> Value {
 }
 
 fn reply(out: &mut impl Write, id: &Value, result: Value) {
-    let _ = writeln!(out, "{}", json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": id, "result": result })
+    );
     let _ = out.flush();
 }
 
 fn fail(out: &mut impl Write, id: &Value, code: i64, message: &str) {
-    let _ = writeln!(out, "{}", json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }));
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+    );
     let _ = out.flush();
 }
 
@@ -671,14 +856,31 @@ fn handle(hub: &Hub, msg: &Value, out: &mut impl Write) {
         "tools/list" => reply(out, &id, json!({ "tools": tools() })),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default();
-            match hub.call(name, &args) {
-                None => reply(out, &id, json!({ "isError": true, "content": [{ "type": "text", "text": format!("unknown tool: {name}") }] })),
-                Some(Ok(v)) => reply(out, &id, json!({
-                    "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }],
-                    "structuredContent": v,
-                })),
-                Some(Err(e)) => reply(out, &id, json!({ "isError": true, "content": [{ "type": "text", "text": e }] })),
+            let args = params
+                .get("arguments")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let identity = resolver::CallerIdentity::from_mcp_meta(params.get("_meta"));
+            match hub.call_with_identity(name, &args, &identity) {
+                None => reply(
+                    out,
+                    &id,
+                    json!({ "isError": true, "content": [{ "type": "text", "text": format!("unknown tool: {name}") }] }),
+                ),
+                Some(Ok(v)) => reply(
+                    out,
+                    &id,
+                    json!({
+                        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default() }],
+                        "structuredContent": v,
+                    }),
+                ),
+                Some(Err(e)) => reply(
+                    out,
+                    &id,
+                    json!({ "isError": true, "content": [{ "type": "text", "text": e }] }),
+                ),
             }
         }
         other => {
@@ -713,7 +915,9 @@ pub fn run() -> i32 {
         std::thread::spawn(move || loop {
             std::thread::sleep(every);
             match crate::dispatcher::dispatcher::ensure_running_supervised() {
-                Ok(Some(pid)) => eprintln!("a2a-hub: dispatcher was not running; restarted (pid {pid})"),
+                Ok(Some(pid)) => {
+                    eprintln!("a2a-hub: dispatcher was not running; restarted (pid {pid})")
+                }
                 Ok(None) => {}
                 Err(err) => eprintln!("a2a-hub: could not restart the dispatcher: {err}"),
             }
@@ -732,4 +936,35 @@ pub fn run() -> i32 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+
+    #[test]
+    fn registered_explicit_backend_is_authoritative() {
+        let resolution = explicit_resolution(
+            ExplicitBackend::Valid(BackendKind::Claude),
+            "opaque-session",
+        );
+        assert_eq!(resolution.backend, BackendKind::Claude);
+        assert_eq!(resolution.caller_session.as_deref(), Some("opaque-session"));
+        assert!(!resolution.diagnostic.contains("opaque-session"));
+    }
+
+    #[test]
+    fn unregistered_explicit_session_uses_safe_opencode() {
+        let resolution = explicit_resolution(ExplicitBackend::Missing, "unknown-session");
+        assert_eq!(resolution.backend, BackendKind::Opencode);
+        assert_eq!(resolution.source, ResolutionSource::SafeDefault);
+        assert!(!resolution.diagnostic.contains("unknown-session"));
+    }
+
+    #[test]
+    fn invalid_explicit_backend_uses_safe_default() {
+        let resolution = explicit_resolution(ExplicitBackend::Invalid, "opaque-session");
+        assert_eq!(resolution.source, ResolutionSource::SafeDefault);
+        assert!(!resolution.diagnostic.contains("opaque-session"));
+    }
 }

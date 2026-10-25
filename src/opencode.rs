@@ -16,7 +16,8 @@ pub struct AgentInfo {
     pub model: Option<Value>,
 }
 
-type AgentCache = std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<AgentInfo>)>>;
+type AgentCache =
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, Vec<AgentInfo>)>>;
 static AGENT_CACHE: std::sync::LazyLock<AgentCache> = std::sync::LazyLock::new(Default::default);
 
 /// Every agent opencode knows (`agent.list`): built-ins, the user's own, project agents of `dir`,
@@ -59,7 +60,10 @@ pub fn agents(dir: Option<&str>) -> Result<Vec<AgentInfo>, String> {
     if list.is_empty() {
         return Err("opencode returned no agents (still loading?)".into());
     }
-    AGENT_CACHE.lock().unwrap().insert(key, (std::time::Instant::now(), list.clone()));
+    AGENT_CACHE
+        .lock()
+        .unwrap()
+        .insert(key, (std::time::Instant::now(), list.clone()));
     Ok(list)
 }
 
@@ -80,7 +84,10 @@ fn parse_info(v: &Value) -> Option<SessionInfo> {
     Some(SessionInfo {
         id: v["id"].as_str()?.to_string(),
         agent: v["agent"].as_str().map(String::from),
-        directory: v["location"]["directory"].as_str().unwrap_or("").to_string(),
+        directory: v["location"]["directory"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
         updated: v["time"]["updated"].as_i64().unwrap_or(0),
         is_child: v["parentID"].is_string(),
     })
@@ -89,10 +96,16 @@ fn parse_info(v: &Value) -> Option<SessionInfo> {
 /// The error a session's last turn failed with (e.g. a provider's `HTTP 403`), if that turn ended
 /// after `since_ms`. `session` is `GET /api/session/{id}` data, `messages` the `/message` data.
 pub fn parse_failure(session: &Value, messages: &Value, since_ms: i64) -> Option<String> {
-    if session["outcome"].as_str() != Some("failed") || session["time"]["updated"].as_i64().unwrap_or(0) <= since_ms {
+    if session["outcome"].as_str() != Some("failed")
+        || session["time"]["updated"].as_i64().unwrap_or(0) <= since_ms
+    {
         return None;
     }
-    let msg = messages.as_array().into_iter().flatten().find_map(|m| m["error"]["message"].as_str().map(String::from));
+    let msg = messages
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|m| m["error"]["message"].as_str().map(String::from));
     Some(msg.unwrap_or_else(|| "the agent's turn failed".to_string()))
 }
 
@@ -102,7 +115,8 @@ pub fn failure_since(id: &str, since_ms: i64) -> Option<String> {
     if s["data"]["outcome"].as_str() != Some("failed") {
         return None; // the common case costs one request
     }
-    let m = sys::api(&bin(), "get", &format!("/api/session/{id}/message"), None).unwrap_or(Value::Null);
+    let m =
+        sys::api(&bin(), "get", &format!("/api/session/{id}/message"), None).unwrap_or(Value::Null);
     parse_failure(&s["data"], &m["data"], since_ms)
 }
 
@@ -130,7 +144,11 @@ impl Usage {
             reasoning: d(self.reasoning, prev.reasoning),
             cache_read: d(self.cache_read, prev.cache_read),
             cache_write: d(self.cache_write, prev.cache_write),
-            cost: if self.cost >= prev.cost { self.cost - prev.cost } else { self.cost },
+            cost: if self.cost >= prev.cost {
+                self.cost - prev.cost
+            } else {
+                self.cost
+            },
             model: self.model.clone(),
         }
     }
@@ -208,7 +226,10 @@ pub fn usage(id: &str) -> Option<Usage> {
 /// Ids of sessions currently running a turn.
 pub fn active_ids() -> Result<HashSet<String>, String> {
     let r = sys::api(&bin(), "get", "/api/session/active", None)?;
-    Ok(r["data"].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default())
+    Ok(r["data"]
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default())
 }
 
 pub fn get(id: &str) -> Option<SessionInfo> {
@@ -219,8 +240,13 @@ pub fn get(id: &str) -> Option<SessionInfo> {
 /// Sessions whose folder is `dir`, newest first (sub-sessions excluded).
 pub fn list(dir: &str) -> Vec<SessionInfo> {
     let route = format!("/api/session?directory={}&limit=25", sys::url_encode(dir));
-    let Ok(r) = sys::api(&bin(), "get", &route, None) else { return vec![] };
-    let mut v: Vec<SessionInfo> = r["data"].as_array().map(|a| a.iter().filter_map(parse_info).collect()).unwrap_or_default();
+    let Ok(r) = sys::api(&bin(), "get", &route, None) else {
+        return vec![];
+    };
+    let mut v: Vec<SessionInfo> = r["data"]
+        .as_array()
+        .map(|a| a.iter().filter_map(parse_info).collect())
+        .unwrap_or_default();
     v.retain(|s| !s.is_child);
     v.sort_by_key(|s| std::cmp::Reverse(s.updated));
     v
@@ -235,7 +261,10 @@ pub fn detect(dir: &str, agent: &str) -> Option<String> {
         .filter_map(|id| get(id))
         .filter(|s| s.directory == dir || crate::hub::project::same_project(dir, &s.directory))
         .collect();
-    let by_agent: Vec<&SessionInfo> = here.iter().filter(|s| s.agent.as_deref() == Some(agent)).collect();
+    let by_agent: Vec<&SessionInfo> = here
+        .iter()
+        .filter(|s| s.agent.as_deref() == Some(agent))
+        .collect();
     match (by_agent.as_slice(), here.as_slice()) {
         ([one], _) => Some(one.id.clone()),
         ([], [one]) => Some(one.id.clone()),
@@ -244,22 +273,43 @@ pub fn detect(dir: &str, agent: &str) -> Option<String> {
 }
 
 pub fn switch_agent(id: &str, agent: &str) -> Result<(), String> {
-    sys::api(&bin(), "post", &format!("/api/session/{id}/agent"), Some(&json!({ "agent": agent }))).map(|_| ())
+    sys::api(
+        &bin(),
+        "post",
+        &format!("/api/session/{id}/agent"),
+        Some(&json!({ "agent": agent })),
+    )
+    .map(|_| ())
 }
 
 /// Stop the turn a session is running right now.
 pub fn interrupt(id: &str) -> Result<(), String> {
-    sys::api(&bin(), "post", &format!("/api/session/{id}/interrupt"), None).map(|_| ())
+    sys::api(
+        &bin(),
+        "post",
+        &format!("/api/session/{id}/interrupt"),
+        None,
+    )
+    .map(|_| ())
 }
 
 pub fn prompt(id: &str, text: &str) -> Result<(), String> {
-    sys::api(&bin(), "post", &format!("/api/session/{id}/prompt"), Some(&json!({ "text": text, "delivery": "queue" }))).map(|_| ())
+    sys::api(
+        &bin(),
+        "post",
+        &format!("/api/session/{id}/prompt"),
+        Some(&json!({ "text": text, "delivery": "queue" })),
+    )
+    .map(|_| ())
 }
 
 /// Create a session (`session.create`); returns its id.
 pub fn create_session(body: &Value) -> Result<String, String> {
     let r = sys::api(&bin(), "post", "/api/session", Some(body))?;
-    r["data"]["id"].as_str().map(String::from).ok_or_else(|| "session create returned no id".into())
+    r["data"]["id"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "session create returned no id".into())
 }
 
 /// File the dispatcher appends to and the TUI plugin tails to open session tabs.
@@ -292,9 +342,23 @@ mod usage_tests {
     fn a_failed_turn_after_the_hand_over_is_reported_with_its_error() {
         let session = json!({"outcome":"failed","time":{"updated":2000}});
         let msgs = json!([{"type":"idle"},{"type":"assistant","error":{"type":"provider.auth","message":"HTTP 403: not licensed"}}]);
-        assert_eq!(parse_failure(&session, &msgs, 1000).as_deref(), Some("HTTP 403: not licensed"));
-        assert_eq!(parse_failure(&session, &msgs, 3000), None, "a failure from before the task was handed over");
-        assert_eq!(parse_failure(&json!({"outcome":"succeeded","time":{"updated":2000}}), &msgs, 1000), None);
+        assert_eq!(
+            parse_failure(&session, &msgs, 1000).as_deref(),
+            Some("HTTP 403: not licensed")
+        );
+        assert_eq!(
+            parse_failure(&session, &msgs, 3000),
+            None,
+            "a failure from before the task was handed over"
+        );
+        assert_eq!(
+            parse_failure(
+                &json!({"outcome":"succeeded","time":{"updated":2000}}),
+                &msgs,
+                1000
+            ),
+            None
+        );
     }
 
     #[test]
@@ -302,9 +366,16 @@ mod usage_tests {
         let v = json!({"cost":0,"model":{"id":"claude-haiku-5.5","providerID":"github-copilot"},
             "tokens":{"input":1000,"output":200,"reasoning":50,"cache":{"read":4000,"write":10}}});
         let a = parse_usage(&v).unwrap();
-        assert_eq!((a.input, a.output, a.reasoning, a.cache_read, a.cache_write), (1000, 200, 50, 4000, 10));
+        assert_eq!(
+            (a.input, a.output, a.reasoning, a.cache_read, a.cache_write),
+            (1000, 200, 50, 4000, 10)
+        );
         assert_eq!(a.model.as_deref(), Some("github-copilot/claude-haiku-5.5"));
-        let b = Usage { input: 1500, output: 260, ..a.clone() };
+        let b = Usage {
+            input: 1500,
+            output: 260,
+            ..a.clone()
+        };
         let d = b.since(&a);
         assert_eq!((d.input, d.output, d.cache_read), (500, 60, 0));
         assert!(parse_usage(&json!({"id":"x"})).is_none());
@@ -312,14 +383,27 @@ mod usage_tests {
 
     #[test]
     fn cost_uses_opencode_when_it_charges_else_the_price_table() {
-        let mut u = Usage { input: 1_000_000, output: 1_000_000, model: Some("github-copilot/claude-haiku-5.5".into()), ..Default::default() };
+        let mut u = Usage {
+            input: 1_000_000,
+            output: 1_000_000,
+            model: Some("github-copilot/claude-haiku-5.5".into()),
+            ..Default::default()
+        };
         let (usd, est) = u.cost_usd().unwrap();
         assert!(est && (usd - 0.60).abs() < 1e-9, "{usd}"); // $0.10 in + $0.50 out
         u.cost = 0.25;
         assert_eq!(u.cost_usd(), Some((0.25, false)));
-        let unknown = Usage { input: 5, model: Some("x/unknown".into()), ..Default::default() };
+        let unknown = Usage {
+            input: 5,
+            model: Some("x/unknown".into()),
+            ..Default::default()
+        };
         assert_eq!(unknown.cost_usd(), None);
-        let free = Usage { input: 9_000_000, model: Some("opencode/beam-free".into()), ..Default::default() };
+        let free = Usage {
+            input: 9_000_000,
+            model: Some("opencode/beam-free".into()),
+            ..Default::default()
+        };
         assert_eq!(free.cost_usd(), Some((0.0, true)));
     }
 }

@@ -29,21 +29,34 @@ impl Picker {
         let found = detected(probe);
         let rows = TARGETS
             .iter()
-            .map(|t| Row { target: t, detected: found.contains(&t.id), checked: found.contains(&t.id) })
+            .map(|t| Row {
+                target: t,
+                detected: found.contains(&t.id),
+                checked: found.contains(&t.id),
+            })
             .collect();
-        let mut p = Picker { rows, cursor: 0, done: false, confirmed: false };
+        let mut p = Picker {
+            rows,
+            cursor: 0,
+            done: false,
+            confirmed: false,
+        };
         p.cursor = p.selectable().first().copied().unwrap_or(0);
         p
     }
 
     /// Row indexes that can be toggled; "coming soon" rows are skipped by the cursor.
     fn selectable(&self) -> Vec<usize> {
-        (0..self.rows.len()).filter(|i| self.rows[*i].target.installable()).collect()
+        (0..self.rows.len())
+            .filter(|i| self.rows[*i].target.installable())
+            .collect()
     }
 
     fn step(&mut self, delta: isize) {
         let ready = self.selectable();
-        let Some(pos) = ready.iter().position(|i| *i == self.cursor) else { return };
+        let Some(pos) = ready.iter().position(|i| *i == self.cursor) else {
+            return;
+        };
         let next = (pos as isize + delta).rem_euclid(ready.len() as isize) as usize;
         self.cursor = ready[next];
     }
@@ -51,7 +64,9 @@ impl Picker {
     fn toggle_all(&mut self) {
         let ready = self.selectable();
         let all_on = ready.iter().all(|i| self.rows[*i].checked);
-        ready.into_iter().for_each(|i| self.rows[i].checked = !all_on);
+        ready
+            .into_iter()
+            .for_each(|i| self.rows[i].checked = !all_on);
     }
 
     pub fn key(&mut self, k: KeyEvent) {
@@ -72,12 +87,22 @@ impl Picker {
     }
 
     pub fn selected(&self) -> Vec<Id> {
-        self.rows.iter().filter(|r| r.checked).map(|r| r.target.id).collect()
+        self.rows
+            .iter()
+            .filter(|r| r.checked)
+            .map(|r| r.target.id)
+            .collect()
     }
 }
 
 fn lines(p: &Picker) -> Vec<Line<'static>> {
-    let mut out = vec![Line::styled("Which agents should codetypera2a configure?", Style::default().add_modifier(Modifier::BOLD)), Line::raw("")];
+    let mut out = vec![
+        Line::styled(
+            "Which agents should codetypera2a configure?",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+    ];
     for (i, row) in p.rows.iter().enumerate() {
         let ready = row.target.installable();
         let glyph = if row.checked { "■" } else { "□" };
@@ -98,7 +123,10 @@ fn lines(p: &Picker) -> Vec<Line<'static>> {
         ]));
     }
     out.push(Line::raw(""));
-    out.push(Line::styled("↑/↓ move · space toggle · a all · enter confirm · esc cancel", Style::default().fg(Color::DarkGray)));
+    out.push(Line::styled(
+        "↑/↓ move · space toggle · a all · enter confirm · esc cancel",
+        Style::default().fg(Color::DarkGray),
+    ));
     out
 }
 
@@ -139,7 +167,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn picker(bins: &'static [&'static str]) -> Picker {
-        let probe = Probe { on_path: Box::new(move |b| bins.contains(&b)), exists: Box::new(|_: &Path| false), home: PathBuf::from("/h") };
+        let probe = Probe {
+            on_path: Box::new(move |b| bins.contains(&b)),
+            exists: Box::new(|_: &Path| false),
+            home: PathBuf::from("/h"),
+        };
         Picker::new(&probe)
     }
 
@@ -148,7 +180,10 @@ mod tests {
     }
 
     fn text(p: &Picker) -> Vec<String> {
-        lines(p).iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect()
+        lines(p)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
     }
 
     #[test]
