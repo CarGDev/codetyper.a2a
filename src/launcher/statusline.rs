@@ -395,6 +395,36 @@ fn spawn_ensure() {
     let _ = sys::spawn_detached(&exe, &args, Path::new("/dev/null"));
 }
 
+/// Remember the tmux pane of an interactive session so the dispatcher can wake it. A headless run
+/// (`A2A_HEADLESS`) inherits the dispatcher's pane, so it never records one.
+fn remember_pane(stdin: &str) {
+    if std::env::var_os("A2A_HEADLESS").is_some() {
+        return;
+    }
+    let Some(pane) = std::env::var("TMUX_PANE").ok() else {
+        return;
+    };
+    let input = serde_json::from_str::<Value>(stdin).ok();
+    let field = |k: &str| input.as_ref().and_then(|v| v[k].as_str().map(String::from));
+    let Some(session) = field("session_id") else {
+        return;
+    };
+    if !crate::dispatcher::wake::record_pane(&paths::claude_runs_dir(), &session, &pane) {
+        return;
+    }
+    if let Some(cwd) = field("cwd") {
+        register_session(&session, &cwd, &pane);
+    }
+}
+
+/// Register the open session as the project's orchestrator so results find it. Best effort: a hook never fails.
+fn register_session(session: &str, cwd: &str, pane: &str) {
+    let Ok(conn) = crate::hub::db::open(&paths::db_path()) else {
+        return;
+    };
+    let _ = crate::hub::db::register_interactive(&conn, "orchestrator", cwd, session, pane, "claude");
+}
+
 /// `oc statusline [--hook start|stop]`; always exits 0 so it can never break Claude Code.
 pub fn run(args: &[String]) -> i32 {
     let hook = match args
@@ -416,7 +446,10 @@ pub fn run(args: &[String]) -> i32 {
                 println!("{out}");
             }
         }
-        Some(Hook::Ensure) => spawn_ensure(),
+        Some(Hook::Ensure) => {
+            remember_pane(&read_stdin());
+            spawn_ensure()
+        }
         Some(h) => {
             record(&paths::statusline_dir(), &read_stdin(), h, now_secs());
         }

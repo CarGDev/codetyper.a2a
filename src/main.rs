@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 mod check_models;
+mod cleanup;
 mod cli;
 mod dispatcher;
 mod eval;
@@ -29,6 +30,8 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("init") => cli::init(rest),
         Some("update") => cli::init(&[rest, &["--md-only".to_string()]].concat()),
+        Some("uninstall") => cleanup::uninstall(rest),
+        Some("reinstall") => cleanup::reinstall(rest),
         Some("hub") => hub::server::run(),
         Some("dispatcher") => dispatcher::dispatcher::run(),
         Some("oc") => launcher::oc::run(rest),

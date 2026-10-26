@@ -17,6 +17,49 @@ tools:
   task: false
 ---
 
+<!-- engineering-rules:start profile: verify (source: docs/engineering-rules.md) -->
+
+### 11. SonarQube, SonarLint, and Static Analysis
+
+Review the code for SonarQube/SonarLint issues and equivalent language-specific static-analysis findings.
+
+- Resolve new bugs, vulnerabilities, and security hotspots.
+- Avoid introducing new code smells.
+- Review cognitive complexity and excessive nesting.
+- Eliminate unused imports, variables, and dead code.
+- Avoid duplicated code.
+- Address nullability and unsafe type conversions.
+- Review resource leaks and unhandled errors.
+- Avoid empty catch blocks and silently swallowed exceptions.
+- Ensure asynchronous operations have appropriate error handling.
+- Do not suppress warnings simply to pass analysis.
+- If a suppression is genuinely necessary, provide a concise technical justification.
+
+Use the project's configured tooling when available, such as ESLint, TypeScript compiler checks, Ruff, Pylint, mypy, golangci-lint, Clippy, Checkstyle, SpotBugs, Roslyn analyzers, or equivalent tools.
+
+Do not claim that SonarQube or any other analyzer passed unless it was actually executed. If the tool is unavailable, report that limitation and perform the available equivalent checks.
+
+### 14. Testing and Verification
+
+Every meaningful code change must include appropriate tests.
+
+Prioritize:
+
+- Unit tests for pure functions and domain rules.
+- Integration tests for databases, routing, and CLI adapters.
+- Concurrency tests for claims, leases, and session ownership.
+- Security tests for cross-project authorization and path handling.
+- Migration tests for existing data.
+- Regression tests for previously supported functionality.
+
+Tests must be deterministic, isolated, and readable.
+
+Avoid excessive mocking that tests implementation details rather than observable behavior.
+
+Run the relevant formatter, linter, type checker, static analyzer, and test suite before reporting completion.
+
+<!-- engineering-rules:end -->
+
 ## Engineering Standards (Synchronized)
 
 Apply these standards within this role without weakening its scope:

@@ -1,7 +1,7 @@
 //! Data for the opencode panel plugin (`plugins/a2a/panels.tsx`): `oc status --json` and `oc answer`.
 use crate::hub::db::{self, TaskRow};
 use crate::{paths, sys};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub(crate) const OPEN: [&str; 4] = ["submitted", "working", "input-required", "auth-required"];
 
@@ -50,6 +50,7 @@ pub fn status_json(args: &[String]) -> Result<Value, String> {
         .and_then(|i| args.get(i + 1))
         .cloned();
     let (d, _) = db::open_read_compat(&paths::db_path())?;
+    let owner = paths::resolve_runtime_home(&paths::runtime_home(), &paths::legacy_home());
     let max_hops = paths::env_u64("DISPATCH_MAX_HOPS", 40) as i64;
     let since = db::iso_ago_ms(3_600_000);
     let mut tasks = db::tasks(
@@ -82,7 +83,46 @@ pub fn status_json(args: &[String]) -> Result<Value, String> {
         "tasks": tasks.iter().map(|t| task_json(&d, t, max_hops)).collect::<Vec<_>>(),
         "progress": { "done": done, "total": tasks.len() },
         "today": { "tokens_in": tin, "tokens_out": tout, "cost_usd": cost },
+        "diagnostics": diagnostics(&d, owner.legacy),
     }))
+}
+
+/// Read-only, bounded health snapshot (additive to `status_json`). Unavailable values are `null`.
+fn diagnostics(d: &rusqlite::Connection, legacy_owner: bool) -> Value {
+    let count = |sql: &str| -> Value {
+        d.query_row(sql, [], |r| r.get::<_, i64>(0))
+            .map_or(Value::Null, |n| json!(n))
+    };
+    let oldest: Option<String> = d
+        .query_row(
+            "SELECT MIN(created_at) FROM tasks WHERE state IN ('submitted','working','input-required','auth-required')",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    let age =
+        oldest.map(|t| ((chrono::Utc::now().timestamp_millis() - db::parse_ms(&t)) / 1000).max(0));
+    let since = db::iso_ago_ms(86_400_000);
+    let events = |kind: &str| -> Value {
+        d.query_row(
+            "SELECT COUNT(*) FROM events WHERE kind = ? AND ts >= ?",
+            [kind, &since],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_or(Value::Null, |n| json!(n))
+    };
+    json!({
+        "owner": if legacy_owner { "legacy" } else { "canonical" },
+        "guard_enforced": paths::runtime_home().join("auth").join("trusted-keys").exists(),
+        "open": {
+            "submitted": count("SELECT COUNT(*) FROM tasks WHERE state='submitted'"),
+            "working": count("SELECT COUNT(*) FROM tasks WHERE state='working'"),
+            "input_required": count("SELECT COUNT(*) FROM tasks WHERE state='input-required'"),
+        },
+        "oldest_open_age_secs": age,
+        "last_24h": { "stall_retry": events("stall_retry"), "stall_failed": events("stall_failed") },
+    })
 }
 
 /// Longest message text `oc messages --json` returns; the pane draws a few lines, not whole reports.

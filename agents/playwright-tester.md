@@ -15,6 +15,217 @@ tools:
   task: true
 ---
 
+<!-- engineering-rules:start profile: test-writer + lang-ts (source: docs/engineering-rules.md) -->
+
+## Code Quality, Clean Architecture, Security, and Engineering Standards
+
+All coding agents (Claude Code, OpenCode, Codex, and any other development CLI) **MUST follow these engineering standards** when implementing, refactoring, reviewing, or testing the project.
+
+These rules apply to all newly written or modified code. Existing code that violates them should be improved when it is within the scope of the change. Avoid unrelated refactoring.
+
+### 3. Mandatory Conditional Formatting
+
+All conditional control-flow blocks must use braces, including single-statement conditions.
+
+**Prohibited:**
+
+```typescript
+if (isReady) return task;
+if (hasError) throw error;
+if (isActive) processTask();
+```
+
+**Required:**
+
+```typescript
+if (isReady) {
+  return task;
+}
+
+if (hasError) {
+  throw error;
+}
+
+if (isActive) {
+  processTask();
+}
+```
+
+Additional requirements:
+
+- Never put an `if` statement and its `return`, `throw`, or execution statement on the same line.
+- Never omit braces for `if`, `else`, `for`, `while`, or similar control-flow constructs in languages that support braces.
+- Use consistent formatting through the language's standard formatter.
+- In Python and other indentation-based languages, use properly indented multiline blocks instead of compressed one-line statements.
+- Avoid complex conditional expressions that reduce readability.
+
+### 4. Function Style and Pure Functions
+
+For JavaScript and TypeScript:
+
+- Prefer arrow functions assigned to `const` for ordinary application functions, callbacks, utilities, services, and handlers.
+- Avoid traditional `function` declarations and expressions unless required by a framework, library, constructor behavior, hoisting requirement, or another documented technical reason.
+- Prefer explicit parameter and return types in TypeScript.
+- Avoid `any`; use precise types, generics, or `unknown` with proper validation.
+- Prefer `const` over `let`.
+- Avoid `var`.
+- Prefer `async`/`await` over deeply chained promises.
+- Do not use an arrow function when its lexical `this` semantics would be incorrect.
+
+For every language:
+
+- Prefer pure functions for transformations, validation, routing decisions, and business rules.
+- Make dependencies explicit.
+- Avoid hidden state, unnecessary mutation, and implicit global dependencies.
+- Separate orchestration functions from domain calculations.
+- Avoid functions with excessive parameters; use cohesive typed parameter objects or equivalent structures when appropriate.
+- Do not sacrifice clarity merely to make a function shorter.
+
+### 5. File Size and Single Responsibility
+
+**Maximum file size: 500 lines of code.**
+
+- This limit applies to newly created and substantially modified source files.
+- Split files before they exceed 500 lines.
+- Prefer smaller, cohesive files where reasonable.
+- Do not place unrelated services, interfaces, utilities, constants, and domain models into a single large file.
+- Each file should have one clear responsibility.
+- Keep pure utilities separate from files containing side effects.
+- Do not create meaningless micro-files merely to reduce line counts.
+- Generated files, lockfiles, vendored code, and required framework-generated artifacts may be exempt, but exemptions must be documented.
+
+Organize code by feature or domain responsibility rather than creating large generic utility collections.
+
+### 7. Naming Conventions
+
+Use meaningful, concise, domain-specific names.
+
+- Avoid single-letter variable names such as `a`, `b`, `x`, or `t`.
+- Avoid vague names such as `data`, `temp`, `obj`, `stuff`, `handler2`, or `result1` when a more precise name is available.
+- Avoid excessively long names that repeat information already clear from the module or type.
+- Prefer names such as `taskId`, `projectPath`, `targetAgent`, `sessionKey`, and `claimToken`.
+- Use verbs for functions and meaningful nouns for values and types.
+- Boolean variables should communicate a condition, such as `isActive`, `hasPermission`, or `canClaim`.
+- Follow standard naming conventions for each language.
+- Conventional short names required or strongly established by a language or API are acceptable when their meaning is unambiguous.
+
+### 8. No Magic Numbers or Magic Strings
+
+- Do not scatter unexplained numeric values, status strings, timeout values, retry counts, or protocol identifiers throughout the codebase.
+- Extract meaningful constants, enums, or typed configuration values.
+- Group constants by domain or feature.
+- Keep reusable constants in dedicated files.
+- Avoid creating global constants files containing unrelated values.
+- Use named configuration values for lease durations, retry policies, database timeouts, batch sizes, and concurrency limits.
+- Use units in names when relevant, such as `leaseDurationMs` or `retryDelaySeconds`.
+- Literal values that are inherently self-explanatory, such as `0` for an empty count, do not require unnecessary abstraction.
+
+### 9. Comments and Documentation Standards
+
+Comments must follow the conventions and documentation standards of the language being used.
+
+Examples include:
+
+- TypeScript/JavaScript: JSDoc or TSDoc where appropriate.
+- Python: PEP 257-compatible docstrings.
+- Go: GoDoc conventions.
+- Rust: Rustdoc conventions.
+- Java: Javadoc.
+- C#: XML documentation comments where appropriate.
+- SQL: concise comments explaining non-obvious constraints, indexes, or migration behavior.
+
+**Do not write temporary development-process comments into production code.**
+
+Prohibited examples:
+
+```typescript
+// task-01
+// TODO agent-2
+// Changed by Claude
+// Implemented during phase 3
+// Fix for prompt step 7
+// As requested by the AI agent
+```
+
+These comments describe temporary development context, not information useful to future maintainers.
+
+Instead:
+
+- Explain *why* non-obvious behavior exists.
+- Document important invariants, security assumptions, concurrency rules, and protocol requirements.
+- Avoid comments that merely restate the code.
+- Remove obsolete comments and commented-out code.
+- Use issue trackers or pull-request descriptions for temporary implementation notes.
+- Use documentation comments for public APIs when required by project conventions.
+- Keep architectural decisions in appropriate documentation or architecture decision records.
+
+Comments must remain useful to developers who have no access to the original prompts or AI-agent conversations.
+
+### 12. Language-Specific Standards
+
+**TypeScript / JavaScript**
+- Prefer arrow functions and `const`.
+- Enable strict TypeScript checks where compatible.
+- Avoid `any`, `var`, and implicit type coercion.
+- Use typed interfaces and discriminated unions.
+- Use object maps for extensible dispatch.
+- Use ESLint and Prettier.
+- Validate external input at runtime.
+
+### 14. Testing and Verification
+
+Every meaningful code change must include appropriate tests.
+
+Prioritize:
+
+- Unit tests for pure functions and domain rules.
+- Integration tests for databases, routing, and CLI adapters.
+- Concurrency tests for claims, leases, and session ownership.
+- Security tests for cross-project authorization and path handling.
+- Migration tests for existing data.
+- Regression tests for previously supported functionality.
+
+Tests must be deterministic, isolated, and readable.
+
+Avoid excessive mocking that tests implementation details rather than observable behavior.
+
+Run the relevant formatter, linter, type checker, static analyzer, and test suite before reporting completion.
+
+#### 2. Language-Specific Secure Implementations
+
+**TypeScript / JavaScript**
+
+- Prefer `Map` or null-prototype objects for handler registries.
+- Validate keys with runtime schemas or explicit allowlists.
+- Never trust TypeScript assertions, `Record`, or interfaces as runtime security controls.
+- Avoid unchecked bracket-property access with untrusted keys.
+- Reject dangerous property names such as `__proto__`, `constructor`, and `prototype` when accepting dynamic object keys.
+- Avoid unsafe object merging and uncontrolled object spreading of untrusted data.
+- Keep registries module-private and expose controlled resolver functions.
+
+#### 6. Mandatory Security Tests
+
+Test applicable implementations against:
+
+- Unknown or unsupported handler identifiers.
+- Malformed, missing, null, or incorrectly typed values.
+- Prototype-related property names where relevant.
+- Reflection and dynamic invocation attempts.
+- Unauthorized project, agent, session, and task access.
+- Command and argument injection attempts.
+- SQL injection attempts.
+- Path traversal and symlink boundary escapes.
+- Unexpected JSON fields and mass-assignment attempts.
+- Duplicate requests and replay attempts.
+- Invalid configuration and environment values.
+- Handler registry mutation attempts.
+- Attempts to bypass validation or authorization.
+- Privilege escalation across project boundaries.
+
+Use language-appropriate unit, integration, and security tests.
+
+<!-- engineering-rules:end -->
+
 ## Engineering Standards (Synchronized)
 
 Apply these standards within this role without weakening its scope:

@@ -1,0 +1,50 @@
+# Which parts of docs/engineering-rules.md each agent carries, by what the agent can do.
+# The source is split by `<!-- rule:ID -->` markers into chunks; ids are the numbers 1..16 of the main sections,
+# 12-<language> (code style per language), dispatch-* (secure dispatch, with dispatch-<language> per language),
+# preamble, design-principles and design-dispatch. `@name` includes another profile. An agent lists profiles, and the
+# chunks it receives are those ids in the order they appear in the source. tests/agents.rs enforces all of this.
+
+# Language packs: only the languages an agent actually works in.
+profile lang-all: 12 12-ts 12-python 12-go 12-rust 12-java 12-csharp 12-sql 12-other dispatch-lang-head dispatch-ts dispatch-python dispatch-go dispatch-rust dispatch-java dispatch-csharp dispatch-sql dispatch-other
+profile lang-ts: 12 12-ts dispatch-lang-head dispatch-ts
+profile lang-dispatch-all: dispatch-lang-head dispatch-ts dispatch-python dispatch-go dispatch-rust dispatch-java dispatch-csharp dispatch-sql dispatch-other
+
+# Building blocks.
+profile style: 1 2 3 4 7 8 9
+profile secure-dispatch: dispatch-registry dispatch-all-intro dispatch-core dispatch-workflow dispatch-injection dispatch-simplicity dispatch-tests dispatch-static dispatch-done
+
+# Roles.
+profile writer: preamble @style 5 6 10 11 13 14 15 16 @secure-dispatch
+profile reviewer: preamble @style 5 6 10 11 13 14 15 16 @secure-dispatch
+profile debugger: preamble @style 10 11 13 14 @secure-dispatch
+profile guardian: preamble @style 10 11 13 14 @secure-dispatch
+profile test-writer: preamble 3 4 5 7 8 9 14 dispatch-tests
+profile security-scan: preamble 10 11 13 dispatch-registry dispatch-all-intro dispatch-core dispatch-workflow dispatch-injection dispatch-tests dispatch-static
+profile verify: 11 14
+profile design-architect: design-principles 6 10 13 design-dispatch
+profile design-diagrams: design-principles 6 10
+profile spec: design-principles 10 14 16
+# Coordinates, routes, explains, summarizes or reads history: no coding rules.
+profile none:
+
+agent api-design-architect: writer lang-all
+agent code-debugger: debugger lang-all
+agent code-reviewer: reviewer lang-all
+agent pr-reviewer: reviewer lang-all
+agent owasp-guardian: guardian lang-all
+agent react-frontend-expert: writer lang-ts
+agent typescript-mcp-expert: writer lang-ts
+agent test-case-generator: test-writer lang-all
+agent playwright-tester: test-writer lang-ts
+agent architect: design-architect
+agent software-architecture-expert: design-diagrams
+agent plan: spec
+agent security-scanner: security-scan lang-dispatch-all
+agent test-runner: verify
+agent brain: none
+agent doc-lookup: none
+agent git-historian: none
+agent mentor: none
+agent orchestrator: none
+agent pr-commenter: none
+agent summarizer: none

@@ -26,12 +26,12 @@
 //!      DISPATCH_BACKEND (opencode | claude; default opencode), DISPATCH_BACKEND_<AGENT> (one agent's
 //!      backend; AGENT upper-case, every non-alphanumeric character `_`), CLAUDE_BIN (claude)
 use super::backend::{self, Backend, SessionState};
-use crate::hub::db::{self, iso_ago_ms, now, parse_ms, TaskRow};
+use crate::hub::db::{self, TaskRow, iso_ago_ms, now, parse_ms};
 use crate::hub::project::{clear_project_cache, project_root, same_project};
 use crate::{opencode, paths, sys};
 use regex::Regex;
-use rusqlite::{params, Connection};
-use serde_json::{json, Value};
+use rusqlite::{Connection, params};
+use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -297,7 +297,14 @@ impl Dispatcher {
         {
             return self.active.1.clone();
         }
-        let asked: R<Vec<HashSet<String>>> = self.backends.iter().map(|b| b.active_ids()).collect();
+        // Only ask a runtime that has open work: a Claude-only install never touches opencode.
+        let needed = needed_backends(&self.conn);
+        let asked: R<Vec<HashSet<String>>> = self
+            .backends
+            .iter()
+            .filter(|b| needed.contains(b.name()))
+            .map(|b| b.active_ids())
+            .collect();
         match asked {
             Ok(sets) => self.active = (Some(Instant::now()), sets.into_iter().flatten().collect()),
             Err(err) => log(&format!("active lookup failed: {}", first_line(&err))),
@@ -442,8 +449,14 @@ impl Dispatcher {
             .backends
             .iter()
             .find(|b| b.name() == name)
-            .map(|b| b.as_ref())
-            .unwrap_or_else(|| self.backend_for(agent));
+            .map(|b| b.as_ref());
+        // With DISPATCH_ONLY set, a session of the other runtime is never woken (no fallback).
+        let Some(backend) = backend.or_else(|| match backend::only() {
+            Some(_) => None,
+            None => Some(self.backend_for(agent)),
+        }) else {
+            return Err(format!("backend {name} is disabled by DISPATCH_ONLY"));
+        };
         backend.send(session, agent, dir, text)
     }
 
@@ -1144,6 +1157,20 @@ fn stored_backend_name(metadata: Option<&str>) -> Result<Option<&'static str>, (
     }
 }
 
+/// Runtimes that have open work: the backend each open task's context is routed to (NULL = opencode).
+/// Nothing open means nothing to ask, so an idle or Claude-only install never contacts opencode.
+fn needed_backends(conn: &rusqlite::Connection) -> BTreeSet<String> {
+    let sql = "SELECT DISTINCT COALESCE(json_extract(c.metadata, '$.routing.backend'), 'opencode') \
+               FROM tasks t JOIN contexts c ON c.id = t.context_id \
+               WHERE t.state IN ('submitted','working','input-required','auth-required')";
+    let Ok(mut stmt) = conn.prepare(sql) else {
+        return backend::NAMES.iter().map(|n| n.to_string()).collect();
+    };
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
 const NUDGE_LEASE_MS: i64 = 60_000;
 
 fn iso_after_ms(ms: i64) -> String {
@@ -1280,7 +1307,8 @@ fn nudge_text(kind: &str, t: &TaskRow, style: &backend::Style) -> String {
             .map(|d| format!(", directory:\"{d}\""))
             .unwrap_or_default();
         return format!(
-            "A2A: you are agent \"{to}\". Task {id} is waiting for you{proj}. Call {p}inbox {{agent:\"{to}\"{dir}}}, claim the task with {p}update_task state \"working\", do the work, then finish with {p}update_task state completed | input-required | failed and put the deliverable in an artifact.{note}",
+            "A2A: you are agent \"{to}\". Task {id} is waiting for you{proj}. Call {p}inbox {{agent:\"{to}\"{dir}}}, claim the task with {p}update_task state \"working\", do the work, then finish with {p}update_task state completed | input-required | failed and put the deliverable in an artifact. Your requester is \"{from}\": report ONLY with {p}update_task on this task, never by creating a new task. The only orchestrator is \"orchestrator\" (never \"gentle-orchestrator\"); do not send it work.{note}",
+            from = t.from_agent,
             to = t.to_agent,
             id = t.id,
             note = style.assignee_note
@@ -1636,5 +1664,31 @@ pub fn run() -> i32 {
             log(&format!("tick error: {err}"));
         }
         std::thread::sleep(Duration::from_millis(d.cfg.poll_ms));
+    }
+}
+
+#[cfg(test)]
+mod needed_tests {
+    use super::*;
+
+    #[test]
+    fn only_runtimes_with_open_work_are_asked() {
+        let dir = std::env::temp_dir().join(format!("a2a-needed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open(&dir.join("hub.db")).unwrap();
+        assert!(needed_backends(&conn).is_empty(), "idle asks nobody");
+        let add = |ctx: &str, backend: Option<&str>, state: &str| {
+            let meta = backend.map(|b| format!(r#"{{"routing":{{"backend":"{b}"}}}}"#));
+            conn.execute("INSERT OR IGNORE INTO agents (name, card, status, created_at, updated_at) VALUES ('a','{}','active','t','t')", []).unwrap();
+            conn.execute("INSERT INTO contexts (id, metadata, created_at, updated_at) VALUES (?, ?, 't', 't')", rusqlite::params![ctx, meta]).unwrap();
+            conn.execute("INSERT INTO tasks (id, context_id, from_agent, to_agent, state, history, artifacts, created_at, updated_at) VALUES (?, ?, 'a', 'a', ?, '[]', '[]', 't', 't')", rusqlite::params![format!("t-{ctx}"), ctx, state]).unwrap();
+        };
+        add("c1", Some("claude"), "working");
+        add("c2", None, "completed");
+        assert_eq!(needed_backends(&conn), BTreeSet::from(["claude".to_string()]));
+        add("c3", None, "submitted");
+        assert_eq!(needed_backends(&conn).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

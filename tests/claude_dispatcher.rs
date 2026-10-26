@@ -43,7 +43,7 @@ impl Env {
         std::fs::write(
             &fake,
             format!(
-                "#!/bin/sh\necho \"$*\" >> {dir}/argv.log\npwd >> {dir}/cwd.log\nmode=$(cat {dir}/mode 2>/dev/null || echo complete)\n\
+                "#!/bin/sh\necho \"$*\" >> {dir}/argv.log\necho \"${{ANTHROPIC_API_KEY:-none}}\" >> {dir}/key.log\npwd >> {dir}/cwd.log\nmode=$(cat {dir}/mode 2>/dev/null || echo complete)\n\
                  id=$(echo \"$2\" | sed -n 's/.*Task \\([0-9a-f-]*\\) is waiting.*/\\1/p')\n\
                  case \"$mode\" in\n  fail) echo boom >&2; exit 3;;\n  slow) echo $$ > {dir}/slow.pid; sleep 60; exit 0;;\n\
                  esac\n\
@@ -76,6 +76,7 @@ impl Env {
             .env("DISPATCH_POLL_MS", "100")
             .env("DISPATCH_RETRY_BASE_MS", "50")
             .env_remove("TMUX")
+            .env_remove("ANTHROPIC_API_KEY")
             .env_remove("TMUX_PANE")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -85,6 +86,21 @@ impl Env {
 
     fn dispatcher(&self) -> Proc {
         Proc(self.cmd("dispatcher").spawn().unwrap())
+    }
+
+    /// The dispatcher started with an `ANTHROPIC_API_KEY` in its environment and the given auth mode.
+    fn dispatcher_with_key(&self, auth: &str) -> Proc {
+        let mut cmd = self.cmd("dispatcher");
+        cmd.env("ANTHROPIC_API_KEY", "test-key-not-real").env("A2A_CLAUDE_AUTH", auth);
+        Proc(cmd.spawn().unwrap())
+    }
+
+    fn keys_seen_by_claude(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.join("key.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
     }
 
     fn hub(&self, tool: &str, args: Value) -> Value {
@@ -495,4 +511,17 @@ fn a_claude_turn_gets_its_own_tmux_window_and_closing_it_does_not_cancel_the_tur
     assert!(alive(pid), "the turn survives its window");
     let _ = Command::new("kill").arg(pid.to_string()).status();
     let _ = std::fs::remove_dir_all(&env.dir);
+}
+
+#[test]
+fn the_api_key_is_withheld_from_headless_turns_unless_api_mode_asks_for_it() {
+    for (auth, expected) in [("subscription", "none"), ("api", "test-key-not-real")] {
+        let env = Env::new(&format!("key-{auth}"));
+        let _d = env.dispatcher_with_key(auth);
+        let task = env.send();
+        wait_for("the fake agent completes the task", || {
+            env.state(&task) == vec!["completed"]
+        });
+        assert_eq!(env.keys_seen_by_claude(), vec![expected.to_string()], "A2A_CLAUDE_AUTH={auth}");
+    }
 }

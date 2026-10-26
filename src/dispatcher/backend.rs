@@ -90,8 +90,28 @@ pub trait Backend: Send + Sync {
 /// The names `DISPATCH_BACKEND` accepts.
 pub const NAMES: [&str; 2] = ["opencode", "claude"];
 
+const ONLY_VAR: &str = "DISPATCH_ONLY";
+
+fn only_from(value: Option<&str>) -> Option<&'static str> {
+    let wanted = value?.trim();
+    NAMES.into_iter().find(|n| *n == wanted)
+}
+
+/// `DISPATCH_ONLY=claude|opencode`: this install runs one runtime only. The other is never built,
+/// asked, woken or started, and new tasks are routed to the chosen one. Unset (or unknown) = both.
+pub fn only() -> Option<&'static str> {
+    only_from(std::env::var(ONLY_VAR).ok().as_deref())
+}
+
+fn allowed(name: &str) -> bool {
+    only().is_none_or(|only| only == name)
+}
+
 /// Backends are built by name; add a line here to add one.
 fn build_one(name: &str) -> Option<Box<dyn Backend>> {
+    if !allowed(name) {
+        return None;
+    }
     match name {
         "opencode" => Some(Box::new(OpencodeBackend)),
         "claude" => Some(Box::new(ClaudeBackend::from_env())),
@@ -106,7 +126,11 @@ pub fn build(names: &BTreeSet<&str>) -> Vec<Box<dyn Backend>> {
 
 /// Ids of the sessions running a turn in any backend (one that cannot be asked counts as none).
 pub fn running_everywhere() -> HashSet<String> {
-    NAMES.iter().filter_map(|n| build_one(n)).flat_map(|b| b.active_ids().unwrap_or_default()).collect()
+    NAMES
+        .iter()
+        .filter_map(|n| build_one(n))
+        .flat_map(|b| b.active_ids().unwrap_or_default())
+        .collect()
 }
 
 /// The backend a `sessions.backend` value stands for (NULL = opencode).
@@ -127,7 +151,10 @@ impl Backend for OpencodeBackend {
     }
 
     fn style(&self) -> Style {
-        Style { tool_prefix: "a2a_", assignee_note: "" }
+        Style {
+            tool_prefix: "a2a_",
+            assignee_note: "",
+        }
     }
 
     fn session_state(&self, id: &str, _registered_dir: &str) -> SessionState {
@@ -142,7 +169,11 @@ impl Backend for OpencodeBackend {
         let mut body = json!({ "title": format!("{agent} (a2a)"), "agent": agent, "location": { "directory": dir } });
         // A session keeps its own model and ignores the agent's, so hand it the one opencode resolved
         // for this agent (set with `codetypera2a models` or in the agent file).
-        if let Some(model) = opencode::agents(Some(dir)).ok().and_then(|l| l.into_iter().find(|a| a.id == agent)).and_then(|a| a.model) {
+        if let Some(model) = opencode::agents(Some(dir))
+            .ok()
+            .and_then(|l| l.into_iter().find(|a| a.id == agent))
+            .and_then(|a| a.model)
+        {
             body["model"] = model;
         }
         opencode::create_session(&body)
@@ -153,7 +184,8 @@ impl Backend for OpencodeBackend {
     }
 
     fn send(&self, session: &str, agent: &str, _dir: Option<&str>, text: &str) -> R<bool> {
-        let info = opencode::get(session).ok_or_else(|| format!("session {session} no longer exists"))?;
+        let info =
+            opencode::get(session).ok_or_else(|| format!("session {session} no longer exists"))?;
         if info.agent.as_deref() != Some(agent) {
             opencode::switch_agent(session, agent)?;
         }
@@ -200,7 +232,10 @@ impl Backend for OpencodeBackend {
     }
 
     fn sent_from(&self, session: &str) -> Option<String> {
-        opencode::get(session).as_ref().filter(|i| usable(i)).map(|i| i.id.clone())
+        opencode::get(session)
+            .as_ref()
+            .filter(|i| usable(i))
+            .map(|i| i.id.clone())
     }
 
     fn session_matches(&self, session: &str, directory: Option<&str>) -> bool {
@@ -218,5 +253,19 @@ impl Backend for OpencodeBackend {
             }
         }
         found.map(|s| s.id)
+    }
+}
+
+#[cfg(test)]
+mod only_tests {
+    use super::*;
+
+    #[test]
+    fn only_names_one_known_runtime_and_anything_else_means_both() {
+        assert_eq!(only_from(Some("claude")), Some("claude"));
+        assert_eq!(only_from(Some(" opencode ")), Some("opencode"));
+        assert_eq!(only_from(Some("bogus")), None);
+        assert_eq!(only_from(Some("")), None);
+        assert_eq!(only_from(None), None);
     }
 }

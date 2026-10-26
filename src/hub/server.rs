@@ -5,19 +5,24 @@
 //! AgentCard registry, Task lifecycle, Messages made of Parts, Artifacts, contextId grouping,
 //! send/get/list/cancel. Delivery is pull-based (agents poll inbox); no push exists between
 //! sessions. State lives in the shared SQLite file (WAL), see `hub::db`.
-use super::db::{self, now, TaskRow, STATES, TERMINAL};
+use super::auth::{self, Gate};
+use super::db::{self, STATES, TERMINAL, TaskRow, now};
 use super::project::same_project;
 use crate::dispatcher::resolver::{
     self, BackendKind, CallerIdentity, Resolution, ResolutionSource, ResolveInput,
 };
 use regex::Regex;
-use rusqlite::{params, Connection};
-use serde_json::{json, Map, Value};
+use rusqlite::{Connection, params};
+use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
 use std::path::Path;
 use uuid::Uuid;
 
 type Args = Map<String, Value>;
+
+fn unix_now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
 
 fn backend_var(agent: &str) -> String {
     agent
@@ -33,6 +38,9 @@ fn backend_var(agent: &str) -> String {
 }
 
 fn configured_backends(agent: &str) -> (Option<String>, Option<String>) {
+    if let Some(only) = crate::dispatcher::backend::only() {
+        return (Some(only.to_string()), None);
+    }
     let per = std::env::var(format!("DISPATCH_BACKEND_{}", backend_var(agent))).ok();
     let global = std::env::var("DISPATCH_BACKEND").ok();
     (per, global)
@@ -268,9 +276,20 @@ impl Hub {
         })
     }
 
+    /// A live row for the orchestrator session in the same project as the credential claims.
+    fn session_live(&self, session: &str, project: &str) -> bool {
+        db::sessions(
+            &self.conn,
+            "WHERE session_id = ? AND agent = ? AND status = 'live'",
+            &[session, auth::PRIMARY_AGENT],
+        )
+        .map(|rows| rows.iter().any(|r| same_project(project, &r.directory)))
+        .unwrap_or(false)
+    }
+
     /// Dispatch a tool call; `None` means the tool does not exist.
     pub fn call(&self, name: &str, a: &Args) -> Option<Result<Value, String>> {
-        self.call_with_identity(name, a, &CallerIdentity::Unknown)
+        self.call_with_identity(name, a, &CallerIdentity::Unknown, &Gate::Open)
     }
 
     /// Internal transport boundary: identity is supplied from MCP metadata, never tool arguments.
@@ -279,17 +298,18 @@ impl Hub {
         name: &str,
         a: &Args,
         identity: &CallerIdentity,
+        gate: &Gate,
     ) -> Option<Result<Value, String>> {
         Some(match name {
             "register_agent" => self.register_agent(a),
-            "list_agents" => self.list_agents(a),
-            "send_message" => self.send_message(a, identity),
+            "list_agents" => self.list_agents(a, identity),
+            "send_message" => self.send_message(a, identity, gate),
             "inbox" => self.inbox(a),
             "get_task" => self.get_task(a),
             "list_tasks" => self.list_tasks(a),
             "update_task" => self.update_task(a),
             "claim_task" => self.claim_task(a),
-            "cancel_task" => self.cancel_task(a),
+            "cancel_task" => self.cancel_task(a, gate),
             _ => return None,
         })
     }
@@ -323,7 +343,7 @@ impl Hub {
         Ok(card)
     }
 
-    fn list_agents(&self, a: &Args) -> Result<Value, String> {
+    fn list_agents(&self, a: &Args, identity: &CallerIdentity) -> Result<Value, String> {
         let mut st = Self::db_err(self.conn.prepare(
             "SELECT card FROM agents WHERE card != '{}' AND status = 'active' ORDER BY name",
         ))?;
@@ -335,7 +355,11 @@ impl Hub {
         // (compaction, title, internal reviewers) are left out unless asked for by name or flag.
         let query = s(a, "query");
         let want_hidden = truthy_bool(a, "includeHidden");
-        if let Ok(known) = crate::opencode::agents(s(a, "directory")) {
+        // A Claude caller never reaches for opencode: its agents are the stored cards.
+        let known = (!identity.is_claude())
+            .then(|| crate::opencode::agents(s(a, "directory")).ok())
+            .flatten();
+        if let Some(known) = known {
             for ag in known {
                 let named = query.is_some_and(|q| q.eq_ignore_ascii_case(&ag.id));
                 if ag.hidden && !want_hidden && !named {
@@ -353,6 +377,8 @@ impl Hub {
             }
             cards.sort_by(|x, y| x["name"].as_str().cmp(&y["name"].as_str()));
         }
+        // never offer the separate harness orchestrator as someone to send work to
+        cards.retain(|c| c["name"] != json!(auth::FORBIDDEN_TARGET));
         if let Some(q) = query {
             let q = q.to_lowercase();
             cards.retain(|c| c.to_string().to_lowercase().contains(&q));
@@ -360,7 +386,12 @@ impl Hub {
         Ok(json!({ "agents": cards }))
     }
 
-    fn send_message(&self, a: &Args, identity: &CallerIdentity) -> Result<Value, String> {
+    fn send_message(
+        &self,
+        a: &Args,
+        identity: &CallerIdentity,
+        gate: &Gate,
+    ) -> Result<Value, String> {
         let from = need(a, "from")?;
         let p = to_parts(a);
         if p.is_empty() {
@@ -377,6 +408,9 @@ impl Hub {
                     ));
                 }
                 let is_requester = from == row.from_agent;
+                if is_requester {
+                    gate.may_act_as_requester(&row.from_agent, from, unix_now(), &|s, p| self.session_live(s, p))?;
+                }
                 let msg = mk_message(
                     if is_requester { "user" } else { "agent" },
                     from,
@@ -397,6 +431,15 @@ impl Hub {
                 return Ok(row_to_task(&self.row(task_id)?, 10));
             }
             let to = need(a, "to")?;
+            gate.may_create(
+                from,
+                s(a, "fromDirectory").or(s(a, "directory")),
+                unix_now(),
+                &|s, p| self.session_live(s, p),
+            )?;
+            if to == auth::FORBIDDEN_TARGET {
+                return Err("task creation denied: that agent is not a valid assignee".into());
+            }
             if to == from {
                 return Err(format!(
                     "'{from}' cannot send a task to itself (it would never be delivered): delegate to a different agent, or do the work yourself"
@@ -652,7 +695,7 @@ impl Hub {
         })
     }
 
-    fn cancel_task(&self, a: &Args) -> Result<Value, String> {
+    fn cancel_task(&self, a: &Args, gate: &Gate) -> Result<Value, String> {
         let id = need(a, "id")?;
         let agent = need(a, "agent")?;
         self.tx(|| {
@@ -662,6 +705,9 @@ impl Hub {
             }
             if agent != row.from_agent && agent != row.to_agent {
                 return Err("only the requester or assignee may cancel".into());
+            }
+            if agent == row.from_agent {
+                gate.may_act_as_requester(&row.from_agent, agent, unix_now(), &|s, p| self.session_live(s, p))?;
             }
             let msg = mk_message(
                 "agent",
@@ -838,7 +884,13 @@ fn fail(out: &mut impl Write, id: &Value, code: i64, message: &str) {
     let _ = out.flush();
 }
 
-fn handle(hub: &Hub, msg: &Value, out: &mut impl Write, transport_identity: &CallerIdentity) {
+fn handle(
+    hub: &Hub,
+    msg: &Value,
+    out: &mut impl Write,
+    transport_identity: &CallerIdentity,
+    gate: &Gate,
+) {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let is_notification = id.is_null();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -862,7 +914,7 @@ fn handle(hub: &Hub, msg: &Value, out: &mut impl Write, transport_identity: &Cal
                 .cloned()
                 .unwrap_or_default();
             let identity = transport_identity.merge_mcp_meta(params.get("_meta"));
-            match hub.call_with_identity(name, &args, &identity) {
+            match hub.call_with_identity(name, &args, &identity, gate) {
                 None => reply(
                     out,
                     &id,
@@ -912,27 +964,35 @@ pub fn run() -> i32 {
         // Keep it alive for as long as opencode keeps this hub: if the dispatcher dies, start it
         // again. Single-instance via its pidfile, so several hubs do not pile up dispatchers.
         let every = std::time::Duration::from_secs(crate::paths::env_u64("A2A_SUPERVISE_SECS", 15));
-        std::thread::spawn(move || loop {
-            std::thread::sleep(every);
-            match crate::dispatcher::dispatcher::ensure_running_supervised() {
-                Ok(Some(pid)) => {
-                    eprintln!("a2a-hub: dispatcher was not running; restarted (pid {pid})")
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(every);
+                match crate::dispatcher::dispatcher::ensure_running_supervised() {
+                    Ok(Some(pid)) => {
+                        eprintln!("a2a-hub: dispatcher was not running; restarted (pid {pid})")
+                    }
+                    Ok(None) => {}
+                    Err(err) => eprintln!("a2a-hub: could not restart the dispatcher: {err}"),
                 }
-                Ok(None) => {}
-                Err(err) => eprintln!("a2a-hub: could not restart the dispatcher: {err}"),
             }
         });
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let transport_identity = CallerIdentity::from_runtime_env();
+    let credential_file = std::env::var_os("A2A_CREDENTIAL_FILE").map(std::path::PathBuf::from);
+    let gate = Gate::load(
+        &crate::paths::runtime_home(),
+        credential_file.as_deref(),
+        unix_now(),
+    );
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&hub, &msg, &mut out, &transport_identity),
+            Ok(msg) => handle(&hub, &msg, &mut out, &transport_identity, &gate),
             Err(_) => fail(&mut out, &Value::Null, -32700, "parse error"),
         }
     }

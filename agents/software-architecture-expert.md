@@ -16,6 +16,76 @@ tools:
   task: true
 ---
 
+<!-- engineering-rules:start profile: design-diagrams (source: docs/engineering-rules.md) -->
+
+### 6. Interfaces, Types, Models, and Contracts
+
+- Define reusable interfaces, types, protocols, and contracts in their own appropriately named files.
+- Do not mix large interface definitions with unrelated business logic.
+- Keep DTOs, domain models, persistence models, and external API contracts conceptually separate.
+- Prefer explicit contracts at module boundaries.
+- Avoid circular dependencies.
+- Avoid broad, ambiguous interfaces with unrelated responsibilities.
+- Follow the language's idiomatic approach: TypeScript interfaces/types, Python protocols or typed models, Go interfaces, Rust traits, Java interfaces, and C# interfaces where appropriate.
+- Do not force interface abstractions into languages or situations where they provide no practical value.
+
+Example TypeScript organization:
+
+```text
+routing/
+  cli-handler.interface.ts
+  cli-type.ts
+  cli-handler-registry.ts
+  resolve-target.ts
+  routing-errors.ts
+```
+
+### 10. Security Requirements
+
+Every coding agent must review security implications before considering a change complete.
+
+Review at least:
+
+- Input validation and output encoding.
+- SQL injection and unsafe dynamic queries.
+- Command injection and shell execution.
+- Path traversal, symbolic links, and filesystem boundary checks.
+- Project and agent identity spoofing.
+- Authentication and authorization.
+- Cross-project access control.
+- Session impersonation and session hijacking.
+- Race conditions and time-of-check/time-of-use vulnerabilities.
+- Task claim ownership and stale lease handling.
+- Sensitive information in logs, events, and error messages.
+- Secret and credential exposure.
+- Dependency vulnerabilities.
+- Denial-of-service risks and unbounded resource consumption.
+- Unsafe deserialization and malformed JSON payloads.
+
+For the A2A Hub specifically:
+
+- Never trust project identity solely from a CLI-supplied path or request field.
+- Validate source and destination project permissions.
+- Use canonical paths and enforce registered project boundaries.
+- Use parameterized SQL statements.
+- Validate task ownership before updates.
+- Enforce claim tokens and lease validity for protected task transitions.
+- Prevent unauthorized agents from reading another project's messages or artifacts.
+- Avoid logging credentials, secrets, or unnecessary message content.
+- Use least-privilege access where supported.
+
+Follow applicable OWASP recommendations and the security practices of the language and framework.
+
+### Design principles (for agents that design, plan or specify and never write code)
+
+- Design for separation of concerns, single responsibility and explicit contracts at module boundaries; keep business logic independent of databases, frameworks, transports and CLI integrations.
+- Prefer simple, composable designs over speculative abstractions; avoid circular dependencies and broad interfaces.
+- Plan work units that are small, cohesive and testable (at most about 400 changed lines), each with its tests and documentation.
+- State the trust boundaries, the data each boundary carries, and who may cross it.
+- Name the quality evidence each unit must produce: formatter, linter, type check, tests, and the security review.
+
+<!-- engineering-rules:end -->
+
 ## Engineering Standards (Synchronized)
 
 Apply these standards within this role without weakening its scope:

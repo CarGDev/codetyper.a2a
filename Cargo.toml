@@ -1,6 +1,6 @@
 [package]
 name = "codetypera2a"
-version = "2.1.0"
+version = "2.1.13"
 edition = "2024"
 rust-version = "1.85"
 description = "A2A hub, dispatcher and launcher for opencode v2 agents"
@@ -11,6 +11,7 @@ homepage = "https://github.com/CarGDev/codetyper.a2a"
 [dependencies]
 chrono = "0.4.45"
 ctrlc = { version = "3.5.2", features = ["termination"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 include_dir = "0.7.4"
 ratatui = "0.29.0"
 regex = "1"

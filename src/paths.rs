@@ -90,6 +90,10 @@ pub struct RuntimePaths {
     pub clients: PathBuf,
 }
 
+/// Refusal for a live legacy owner. Safe context only: no paths, pids or secrets; raised before
+/// the destination is inspected, so nothing was copied, merged, removed or renamed.
+pub const LEGACY_LIVE_REFUSAL: &str = "legacy dispatcher is still running; migration refused (owner=legacy-live, destination_touched=false; stop the legacy dispatcher, then retry)";
+
 pub fn legacy_dispatcher_live(legacy: &Path) -> bool {
     let pid = legacy.join("hub.db.dispatcher.pid").into_os_string();
     std::fs::read_to_string(pid)
@@ -202,7 +206,7 @@ pub fn migrate_legacy_locked(
         return Ok(false);
     }
     if legacy_dispatcher_live(legacy) {
-        return Err("legacy dispatcher is still running; migration refused".into());
+        return Err(LEGACY_LIVE_REFUSAL.into());
     }
     let result = (|| {
         if !destination_is_scaffolding(home).map_err(|e| e.to_string())? {
@@ -242,7 +246,7 @@ pub fn legacy_read_database(
     let marker = home.join(".legacy-fallback-release");
     if !marker.exists() {
         return Err(
-            "legacy database fallback marker is missing; migrate the legacy home first".into(),
+            "legacy database fallback marker is missing: a legacy dispatcher is still running; stop it, or run `codetypera2a uninstall --yes` for a clean slate".into(),
         );
     }
     let release = std::fs::read_to_string(&marker).map_err(|e| e.to_string())?;
@@ -535,5 +539,20 @@ mod tests {
         assert!(migrate_legacy(&home, &legacy).is_err());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "outside");
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn the_live_legacy_refusal_keeps_its_prefix_and_names_safe_context_only() {
+        assert!(
+            LEGACY_LIVE_REFUSAL
+                .starts_with("legacy dispatcher is still running; migration refused")
+        );
+        assert!(LEGACY_LIVE_REFUSAL.contains("destination_touched=false"));
+        assert!(!LEGACY_LIVE_REFUSAL.contains('/'));
     }
 }

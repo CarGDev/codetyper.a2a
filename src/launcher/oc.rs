@@ -59,7 +59,7 @@ COMMANDS:
                         --dir <folder>; --no-interrupt keeps running turns going; --yes skips asking
   oc shutdown           cancel open tasks, stop running turns and the dispatcher (automatic when
                         the last opencode started with `oc` exits; --force ignores other opencodes)
-  oc status --json      the same as JSON (tasks, questions, progress, today's cost); --dir <folder>
+  oc status --json      the same as JSON (tasks, questions, progress, today's cost, diagnostics); --dir <folder>
   oc messages --json    the latest task messages, newest first; --since <iso>, --limit N (default 50)
   oc answer <task> <text>
                         reply to a task that waits for you (input-required)

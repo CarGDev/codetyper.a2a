@@ -13,7 +13,7 @@
 
 <p>
 <a href="https://github.com/CarGDev/codetyper.a2a/releases"><img src="https://img.shields.io/github/v/release/CarGDev/codetyper.a2a?style=for-the-badge&label=release" alt="Latest release"></a>
-<img src="https://img.shields.io/badge/version-2.1.0-2ac3de?style=for-the-badge" alt="Version 2.1.0">
+<img src="https://img.shields.io/badge/version-2.1.13-2ac3de?style=for-the-badge" alt="Version 2.1.13">
 <img src="https://img.shields.io/badge/Rust-1.85%2B-f74c00?style=for-the-badge&logo=rust&logoColor=white" alt="Rust 1.85+">
 <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-7aa2f7?style=for-the-badge" alt="Platform">
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge" alt="License: Apache 2.0"></a>
@@ -188,7 +188,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 2.1.0
+codetypera2a --version        # codetypera2a 2.1.13
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
@@ -308,6 +308,7 @@ Known limits:
 - The opencode tabs plugin has no Claude Code version; the A2A pane below is the Claude Code counterpart of the
   panels, and `oc status` and `oc watch` still work from a shell.
 - Agents run on Claude only when routed there (`DISPATCH_BACKEND` / `DISPATCH_BACKEND_<AGENT>`); the default stays opencode.
+- To keep the two runtimes apart, set `DISPATCH_ONLY=claude` (or `opencode`) for the hub and the dispatcher: the other runtime is never started or woken and new tasks route to the chosen one.
 - The `plan` agent and the `/plan-*` commands still look for plans in `.opencode/plans/`.
 
 #### The A2A pane (Claude Code)
@@ -379,6 +380,24 @@ codetypera2a init --no-ollama                                    # skip the disc
   snippet is printed). `init --md-only` / `update` never touch `opencode.jsonc`.
 - Claude Code cannot take arbitrary providers, so this is opencode only. Check the provider with
   `opencode models --standalone | grep ollama`.
+
+### Clean uninstall / reinstall
+
+```sh
+codetypera2a uninstall            # dry run: lists everything it would delete
+codetypera2a uninstall --yes      # delete it all, for good (no backups); --keep-binary keeps the binary
+codetypera2a reinstall --yes      # same, keeps this binary, runs init --yes, then verifies a clean state
+```
+
+Written in Rust, no scripts. It deletes the agent and command files `init` installed in `~/.claude` and the opencode config dir
+(only those template files and their `.bak-a2a` copies; agents and commands you wrote are never touched), the A2A pane, our MCP entries (`a2a` and the companions `init` added), `default_agent`, the Ollama providers, our
+status line, hooks and plugin entries, the shell-rc block, both runtime homes with every database (the legacy
+`~/.config/opencode/a2a` too), the `a2a-status` tmux window, every dispatcher (`codetypera2a dispatcher`, `oc dispatch`)
+and, for `uninstall`, the binary and the `oc` link (also `cargo uninstall` / `brew uninstall`). The binary is removed only from
+a cargo or Homebrew location (never a build folder or a copy you placed by hand), `oc` only when it is a link to that binary,
+and a runtime home only when it is named `.codetypera2a`, is the legacy `<opencode dir>/a2a`, or holds our files. Your own entries in
+`opencode.jsonc`, `~/.claude.json` and `settings.json` are kept, but those files are rewritten without comments.
+`reinstall` ends with `verified: no dispatcher, no legacy database, the database is empty`, or lists what is not clean.
 
 ### Uninstall
 
@@ -481,6 +500,11 @@ it. `init` does not overwrite an existing policy file (add `--force`).
 - Keep agents least-privilege: the `orchestrator`, `plan` and `architect` templates cannot edit project
   files (plans go to `.opencode/plans/` or `~/.config/opencode/plans/`), and probes and reviews are read-only by instruction. Check the
   `tools:` and `permission:` blocks of any agent you add.
+- **Authenticated assignment (opt-in).** Create `<runtime home>/auth/trusted-keys` (`<kid> <hex Ed25519 public key>`,
+  at most two keys) and only an orchestrator holding a signed, short-lived credential can create tasks or reply and
+  cancel as the requester; the runtime passes it as a one-shot 0600 file in `A2A_CREDENTIAL_FILE`. Without the file
+  nothing changes; with it and no valid credential, task creation is denied. Anyone who can delete that file or change
+  the runtime home can switch it off, so keep both private.
 - Task messages are stored in a local SQLite file (`~/.config/opencode/a2a/hub.db`): never put secrets
   in them.
 

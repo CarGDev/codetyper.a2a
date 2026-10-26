@@ -189,6 +189,8 @@ pub struct ClaudeBackend {
     bin: String,
     /// session id -> (finished at ms, error) of the last failed turn; the dispatcher process only.
     failures: Arc<Mutex<HashMap<String, (i64, String)>>>,
+    /// Which credentials headless turns use; decided on the first turn and logged once.
+    auth: std::sync::OnceLock<super::claude_auth::Choice>,
 }
 
 impl ClaudeBackend {
@@ -197,6 +199,7 @@ impl ClaudeBackend {
             runs: paths::claude_runs_dir(),
             bin: std::env::var("CLAUDE_BIN").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| "claude".into()),
             failures: Arc::default(),
+            auth: std::sync::OnceLock::new(),
         }
     }
 
@@ -275,6 +278,10 @@ impl Backend for ClaudeBackend {
     }
 
     fn send(&self, session: &str, agent: &str, dir: Option<&str>, text: &str) -> R<bool> {
+        // An interactive session in a tmux pane is woken by typing into it; a headless run cannot.
+        if let Some(pane) = super::wake::pane_for(&self.runs, session) {
+            return super::wake::inject(&pane, text);
+        }
         if self.running_pid(session).is_some() {
             return Ok(false);
         }
@@ -285,10 +292,21 @@ impl Backend for ClaudeBackend {
         std::fs::create_dir_all(&self.runs).map_err(|e| e.to_string())?;
         let log_file = self.log_file(session);
         let out_file = std::fs::File::create(&log_file).map_err(|e| format!("cannot create {}: {e}", log_file.display()))?;
-        let child = Command::new(&self.bin)
+        let mut command = Command::new(&self.bin);
+        let auth = self.auth.get_or_init(|| {
+            let choice = super::claude_auth::choose(&self.bin);
+            log(&choice.summary);
+            choice
+        });
+        if auth.strip_key {
+            command.env_remove("ANTHROPIC_API_KEY");
+        }
+        let child = command
             .args(&args)
             .current_dir(&cwd)
             .stdin(Stdio::null())
+            .env("A2A_HEADLESS", "1")
+
             .stdout(out_file)
             .stderr(Stdio::piped())
             .process_group(0)
@@ -306,11 +324,12 @@ impl Backend for ClaudeBackend {
             let was = ClaudeBackend::read_meta(&runs, &session)["started"].as_bool().unwrap_or(false);
             let started = was || settled.started || transcript_exists(&session);
             ClaudeBackend::write_meta(&runs, &session, &json!({ "cwd": cwd, "started": started }));
+            let source = super::claude_auth::reported_source(&stdout).unwrap_or_else(|| "unknown".into());
             let Some(why) = settled.failure else {
-                log(&format!("claude turn of {agent} (session {session}) ended"));
+                log(&format!("claude turn of {agent} (session {session}) ended (credentials: {source})"));
                 return;
             };
-            log(&format!("claude turn of {agent} (session {session}) failed: {why}"));
+            log(&format!("claude turn of {agent} (session {session}) failed: {why} (credentials: {source})"));
             failures.lock().unwrap().insert(session, (chrono::Utc::now().timestamp_millis(), why));
         });
         Ok(true)

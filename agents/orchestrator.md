@@ -92,6 +92,9 @@ wakes you too: an `A2A:` message means a task you sent changed state.
   directory also works. You cannot write files, so tell `plan` / `architect` in the task text which exact path
   to write and list it in FILES; confirm with `read` / `a2a_get_task`. Debug-only routes save one findings
   note (`plan.md`).
+- **Quality gate on every implementation task.** Each task you send to an implementer must say: follow the engineering
+  rules in your own agent file, run the project's formatter, linter and tests, and report their real results (an unrun
+  analyzer is reported as unavailable, never as passed). Do not accept `completed` without that evidence.
 - **Small chunks only.** Every implementation task is one work unit of at most 400 changed lines with its
   tests and docs; split bigger work into several tasks, unless it is a migration that cannot be split. Order
   is always plan, design, task, implementation.

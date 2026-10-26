@@ -2,6 +2,8 @@
 
 Thanks for helping. This is a small Rust project; the notes below keep changes easy to review.
 
+Agents working on this repository (Claude Code, opencode, Codex) also follow [AGENTS.md](AGENTS.md); it is not an agent template.
+
 By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Security problems go to
 [SECURITY.md](SECURITY.md), not to a public issue. Questions: [carlos@cargdev.io](mailto:carlos@cargdev.io).
 

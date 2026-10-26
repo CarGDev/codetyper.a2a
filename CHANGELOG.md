@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [2.1.0] - 2026-10-24
+## [2.1.13] - 2026-10-25
 
 Claude Code becomes a full runtime for the hub: its agents are woken by the dispatcher, its usage and messages are
 visible, and `init` sets everything up in one command.
@@ -72,6 +72,65 @@ visible, and `init` sets everything up in one command.
   `oc statusline --hook start|stop` in `<config>/a2a/statusline-subagents/` (`A2A_STATUSLINE_DIR` overrides; entries
   older than 10 minutes are ignored). It reads the hub read-only and always exits 0. Code: `src/launcher/statusline.rs`,
   `src/targets/settings.rs`.
+- **Authenticated task assignment (opt-in).** When `<runtime home>/auth/trusted-keys` exists (lines of
+  `<kid> <64 hex Ed25519 public key>`, at most two for rotation; optional `auth/revoked-jti`), only the orchestrator
+  holding a valid signed credential may create tasks or act as a task's requester (reply, cancel). The trusted runtime
+  hands the hub a one-shot 0600 credential file (`A2A_CREDENTIAL_FILE`, read once, then deleted); the hub verifies
+  signature, key id, issuer, audience, exact agent `orchestrator`, lifetime (15 minutes at most, 60 s skew), replay and
+  revocation, and on every call re-checks expiry and that the orchestrator session is live in the same project.
+  `from`, `_meta` and environment values never establish identity; denials are stable categories with no secrets and
+  create no rows. Assignees keep claiming and updating under the existing ownership rules. With no keys file nothing
+  changes; with keys but no valid credential task creation is denied. A task can never be sent to
+  `gentle-orchestrator`.
+- **Callbacks reach an interactive Claude Code session in tmux.** The `SessionStart` hook records the session's pane
+  (`<runtime home>/claude-runs/<session>.pane`, validated ids, never for headless runs: they carry `A2A_HEADLESS`); when
+  a task you sent changes state, the Claude backend types the one-line nudge into that pane (only while it is not
+  mid-turn, otherwise it retries) instead of running a headless turn, so you no longer have to ask for status.
+- **Claude turns no longer fail with "Credit balance is too low".** Headless `claude -p` turns start without
+  `ANTHROPIC_API_KEY` when your `claude.ai` subscription is logged in, so they use it instead of an API key left in
+  the shell. `A2A_CLAUDE_AUTH=auto|subscription|api` chooses (default `auto`: subscription if `claude auth status` shows
+  one, else the key, else Claude's own behaviour); the choice and the credential each turn really used (`apiKeySource`)
+  are written to the dispatcher log.
+- **The tmux wake-up no longer garbles your input box.** The nudge is pasted in one piece (bracketed paste) instead of typed
+  key by key, is never sent while the input box already holds text, waits 8 s between two nudges to the same pane, and
+  clears its own text if it was not submitted.
+- **The interactive Claude session is registered.** The `SessionStart` hook registers it as the project's orchestrator
+  (session, folder, tmux pane), so a finished task finds its requester and the nudge is typed into that pane.
+  `list_agents` for a Claude caller no longer runs opencode.
+- **`AGENTS.md` and `CLAUDE.md`.** Standing rules for the agents that work on this repository (read-only git, the version
+  rule while developing, the go-to-production routine, safety defaults). Not an agent template and not shipped; `CLAUDE.md`
+  imports it for Claude Code, opencode reads `AGENTS.md`.
+- **Engineering rules, by what each agent can do.** The mandatory Code Quality, Clean Architecture, Security and
+  Engineering Standards live in `docs/engineering-rules.md`, split by `<!-- rule:ID -->` markers into chunks (the numbered
+  sections, code style and secure dispatch per language, design principles). `docs/rules-profiles.txt` composes profiles
+  and gives each agent only what it can use: writers, reviewers, debuggers and test writers get the code rules, and only
+  the languages they work in (the TypeScript agents no longer carry Go, Java or SQL); `architect`,
+  `software-architecture-expert` and `plan` get short design, contract, security and definition-of-done chunks with no code
+  examples; `security-scanner` the security and dispatch chunks; `test-runner` static analysis and testing; `brain`,
+  `mentor`, `orchestrator`, `summarizer`, `doc-lookup`, `git-historian` and `pr-commenter` none. The orchestrator instead
+  requires every implementation task to say "follow your rules, run the formatter, linter and tests, report real
+  results". A test fails when an agent's block differs from its profile. `codetypera2a update` refreshes installed agents.
+- **Agents are told who their orchestrator is.** The assignee nudge now names the requester and says to report only
+  with `update_task`, never by creating a task; `gentle-orchestrator` is refused as a target and hidden from
+  `list_agents`.
+- **`codetypera2a uninstall` and `reinstall`.** Rust only. `uninstall` deletes everything, for good and with no backups:
+  the agent and command files `init` installed in `~/.claude` and the opencode dir (never files you wrote), our entries in `opencode.jsonc`, `~/.claude.json` and
+  `settings.json`, the shell block, the runtime homes and databases (legacy included), our dispatchers, the tmux window
+  and the binary with `oc`. `reinstall` does the same except the binary, runs `init --yes` and verifies there is no live
+  dispatcher, no legacy database and an empty database. Dry run unless `--yes`.
+- **Runtimes stay apart by themselves.** The dispatcher only asks a runtime that has open work, routed by each
+  task's context (a Claude session's tasks are `claude`, set by its `A2A_RUNTIME=claude` MCP entry), so a Claude-only
+  install never contacts opencode and needs no setting.
+- **`DISPATCH_ONLY=claude|opencode`.** Optional hard override: runs one runtime only: the other is never built, asked, woken or started, and new
+  tasks are routed to the chosen one whatever the caller or per-agent override says. Unset keeps both.
+- **`oc status --json` `diagnostics`.** An additive, read-only block: owner (`canonical`/`legacy`), whether the guard
+  is enforced, open counts, oldest open age and 24-hour `stall_retry` / `stall_failed` counts. Existing keys are unchanged.
+
+### Changed
+
+- The live-legacy migration refusal now reads `... migration refused (owner=legacy-live, destination_touched=false; ...)`;
+  the prefix and the check order are unchanged.
+- New dependency: `ed25519-dalek`.
 
 ### Known limits (Claude Code)
 

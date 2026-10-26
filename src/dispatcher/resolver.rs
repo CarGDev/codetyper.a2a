@@ -146,6 +146,10 @@ impl CallerIdentity {
         }
     }
 
+    pub fn is_claude(&self) -> bool {
+        self.runtime() == Some(BackendKind::Claude)
+    }
+
     fn runtime(&self) -> Option<BackendKind> {
         match self {
             Self::Known { runtime, .. } => Some(*runtime),

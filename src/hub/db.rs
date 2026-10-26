@@ -542,6 +542,30 @@ pub fn open_read_compat(path: &Path) -> Result<(Connection, Option<String>), Str
     Ok((conn, None))
 }
 
+/// Record an interactive session (one that lives in a tmux pane): older live rows of the same agent in
+/// the same folder and runtime are retired so the newest session is the one results are sent to.
+pub fn register_interactive(
+    conn: &Connection,
+    agent: &str,
+    directory: &str,
+    session: &str,
+    pane: &str,
+    backend: &str,
+) -> rusqlite::Result<()> {
+    ensure_agent(conn, agent)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE sessions SET status='stale' WHERE agent=? AND directory=? AND backend=? AND status='live'",
+        rusqlite::params![agent, directory, backend],
+    )?;
+    let t = now();
+    tx.execute(
+        "INSERT INTO sessions (agent, directory, session_id, tmux_target, backend, created_at, last_seen_at) VALUES (?,?,?,?,?,?,?)",
+        rusqlite::params![agent, directory, session, pane, backend, t, t],
+    )?;
+    tx.commit()
+}
+
 /// Foreign keys need the rows a task points at; create placeholders (`INSERT OR IGNORE`, so a real
 /// card or context is never overwritten).
 pub fn ensure_agent(conn: &Connection, name: &str) -> rusqlite::Result<()> {

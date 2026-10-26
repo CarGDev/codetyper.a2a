@@ -29,6 +29,12 @@ COMMANDS:
                  ~/.claude and register the same MCP servers in ~/.claude.json
   models         Choose each agent's model from the models opencode has (terminal UI);
                  --recommended applies the suggested ones, --show prints the table
+  uninstall      Delete everything codetypera2a put on this machine, for good (no backups): the agent and command files
+                 `init` installed in ~/.claude and the opencode config dir (never files you wrote), our MCP/plugin/hook/status-line entries, the shell
+                 block, the runtime homes and databases (also the legacy ones, only when they are ours), our dispatchers and
+                 the binary when cargo or brew owns it (and an oc link to it). Dry run unless --yes; --keep-binary keeps it
+  reinstall      Same clean-up but keeps this binary, then runs init --yes and verifies: no dispatcher, no legacy
+                 database, empty database. Dry run unless --yes. Update the binary first: cargo install --path . --force
   hub            Run the A2A hub (MCP server over stdio; register it in opencode.jsonc)
   dispatcher     Run the dispatcher daemon that wakes sessions when the hub has work
   oc [cmd]       Run opencode in this pane with the dispatcher alongside: (none) | dispatch
@@ -70,6 +76,14 @@ INIT OPTIONS:
 ENV:
   A2A_DB, A2A_AGENT_DIR, A2A_POLICY, A2A_DISPATCHER_PID, OPENCODE_BIN, OC_MODEL, OC_MODEL_FORCE,
   DISPATCH_POLL_MS, DISPATCH_MAX_HOPS, DISPATCH_STALL_SECS, DISPATCH_DRY_RUN
+  DISPATCH_BACKEND, DISPATCH_BACKEND_<AGENT>  run all / one agent on claude or opencode (default opencode)
+  DISPATCH_ONLY  claude | opencode: never build, ask or wake the other runtime (optional; a runtime with
+                 no open work is not contacted anyway)
+  A2A_CREDENTIAL_FILE  one-shot 0600 credential the trusted runtime hands the hub; used only when
+                 <runtime home>/auth/trusted-keys exists (then only the signed orchestrator can create tasks)
+  A2A_CLAUDE_AUTH  auto | subscription | api: which credentials headless Claude turns use when both a
+                 subscription login and ANTHROPIC_API_KEY exist (auto = the subscription)
+  CODETYPERA2A_HOME  runtime home (default ~/.codetypera2a)
 
 CHECK-MODELS OPTIONS:
   --config <f>   opencode.jsonc to read
