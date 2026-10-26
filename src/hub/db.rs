@@ -517,24 +517,7 @@ fn open_inner(path: &Path, migrate_legacy: bool) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Open the legacy database read-only during the one-release compatibility window.
 pub fn open_read_compat(path: &Path) -> Result<(Connection, Option<String>), String> {
-    if std::env::var_os("A2A_DB").is_none() && path == crate::paths::runtime_home().join("hub.db") {
-        let owner = crate::paths::resolve_runtime_home(
-            &crate::paths::runtime_home(),
-            &crate::paths::legacy_home(),
-        );
-        if owner.legacy {
-            if let Some((legacy, warning)) = crate::paths::legacy_read_database(
-                &crate::paths::runtime_home(),
-                &crate::paths::legacy_home(),
-            )? {
-                let conn = Connection::open_with_flags(&legacy, OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .map_err(|e| format!("{}: {e}", legacy.display()))?;
-                return Ok((conn, Some(warning)));
-            }
-        }
-    }
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     conn.busy_timeout(Duration::from_millis(8000))

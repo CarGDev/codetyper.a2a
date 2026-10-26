@@ -1,7 +1,7 @@
 //! Where things live. Runtime state is client-neutral and hangs off one private home.
 use std::path::{Path, PathBuf};
 
-/// Compatibility marker for the one-release legacy read fallback.
+/// Marker written into a migrated runtime tree.
 pub const COMPAT_RELEASE: &str = "codetypera2a-home-1";
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -103,27 +103,15 @@ pub fn legacy_dispatcher_live(legacy: &Path) -> bool {
 }
 
 pub fn resolve_runtime_home(canonical: &Path, legacy: &Path) -> RuntimeHome {
-    if legacy_dispatcher_live(legacy) {
-        RuntimeHome {
-            root: legacy.to_path_buf(),
-            legacy: true,
-        }
-    } else {
-        RuntimeHome {
-            root: canonical.to_path_buf(),
-            legacy: false,
-        }
-    }
+    // Legacy state is migration input only and can never become an active owner.
+    let _ = legacy;
+    RuntimeHome { root: canonical.to_path_buf(), legacy: false }
 }
 
 pub fn runtime_paths(home: &RuntimeHome) -> RuntimePaths {
     RuntimePaths {
         pid: env_path("A2A_DISPATCHER_PID").unwrap_or_else(|| {
-            if home.legacy {
-                home.root.join("hub.db.dispatcher.pid")
-            } else {
-                home.root.join("dispatcher.pid")
-            }
+            home.root.join("dispatcher.pid")
         }),
         lock: env_path("A2A_DISPATCHER_LOCK").unwrap_or_else(|| home.root.join("dispatcher.lock")),
         log: env_path("A2A_DISPATCHER_LOG").unwrap_or_else(|| home.root.join("dispatcher.log")),
@@ -209,23 +197,41 @@ pub fn migrate_legacy_locked(
         return Err(LEGACY_LIVE_REFUSAL.into());
     }
     let result = (|| {
+        if !home.is_absolute() || !legacy.is_absolute() {
+            return Err("migration roots must be absolute".into());
+        }
         if !destination_is_scaffolding(home).map_err(|e| e.to_string())? {
             return Err(format!(
                 "migration destination is not empty: {}",
                 home.display()
             ));
         }
-        restrict_tree(legacy).map_err(|e| format!("legacy runtime state is unsafe: {e}"))?;
-        if home.exists() {
-            for entry in std::fs::read_dir(home).map_err(|e| e.to_string())? {
-                std::fs::remove_file(entry.map_err(|e| e.to_string())?.path())
-                    .map_err(|e| e.to_string())?;
+        if !legacy.is_dir() { return Err("legacy runtime root is not a directory".into()); }
+        let quarantine_root = legacy.parent().unwrap_or(Path::new(".")).join(".codetypera2a-legacy-quarantine");
+        ensure_private_dir(&quarantine_root).map_err(|e| e.to_string())?;
+        let mut quarantine = None;
+        let entries = std::fs::read_dir(legacy).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        for entry in entries {
+            let name = entry.file_name();
+            if std::fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?.file_type().is_symlink() {
+                return Err("legacy runtime state contains a symlink".into());
             }
-            std::fs::remove_dir(home).map_err(|e| e.to_string())?;
+            let recognized = matches!(name.to_str(), Some("hub.db" | "hub.db-wal" | "hub.db-shm" | "dispatcher.pid" | "hub.db.dispatcher.pid" | "dispatcher.lock" | "dispatcher.log" | "tabs.jsonl" | "dispatcher.stopped" | "model-policy.json" | "clients" | "statusline-subagents" | "claude-runs"));
+            if !recognized { continue; }
+            let src = entry.path();
+            restrict_tree(&src).map_err(|e| format!("legacy runtime state is unsafe: {e}"))?;
+            let dst = home.join(&name);
+            if dst.exists() { return Err(format!("migration destination already contains {}", name.to_string_lossy())); }
+            if let Some(dir) = dst.parent() { ensure_private_dir(dir).map_err(|e| e.to_string())?; }
+            if quarantine.is_none() {
+                let mut i = 0u32;
+                loop { let candidate = quarantine_root.join(format!("state-{i}")); if std::fs::create_dir(&candidate).is_ok() { quarantine = Some(candidate); break; } i += 1; if i == 1000 { return Err("legacy quarantine unavailable".into()); } }
+            }
+            let quarantine_path = quarantine.as_ref().unwrap().join(&name);
+            copy_tree(&src, &dst).map_err(|e| e.to_string())?;
+            std::fs::rename(&src, &quarantine_path).map_err(|e| e.to_string())?;
         }
-        std::fs::rename(legacy, home)
-            .map_err(|e| format!("legacy migration rename failed: {e}"))?;
-        restrict_tree(home).map_err(|e| e.to_string())?;
+        if legacy.read_dir().map_err(|e| e.to_string())?.next().is_none() { let _ = std::fs::remove_dir(legacy); }
         let marker = home.join(".migration-release");
         std::fs::write(&marker, COMPAT_RELEASE).map_err(|e| e.to_string())?;
         ensure_private_file(&marker).map_err(|e| e.to_string())?;
@@ -234,29 +240,12 @@ pub fn migrate_legacy_locked(
     result
 }
 
-/// Return a legacy DB for read-only compatibility without changing either runtime home.
-pub fn legacy_read_database(
-    home: &std::path::Path,
-    legacy: &std::path::Path,
-) -> Result<Option<(PathBuf, String)>, String> {
-    let db = legacy.join("hub.db");
-    if !db.exists() {
-        return Ok(None);
-    }
-    let marker = home.join(".legacy-fallback-release");
-    if !marker.exists() {
-        return Err(
-            "legacy database fallback marker is missing: a legacy dispatcher is still running; stop it, or run `codetypera2a uninstall --yes` for a clean slate".into(),
-        );
-    }
-    let release = std::fs::read_to_string(&marker).map_err(|e| e.to_string())?;
-    if release.trim() != COMPAT_RELEASE {
-        return Err("legacy database fallback expired; migrate the legacy home first".into());
-    }
-    Ok(Some((
-        db,
-        "using legacy A2A database; migration is recommended".into(),
-    )))
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "symlink in migration")); }
+    if meta.is_dir() { ensure_private_dir(dst)?; for e in std::fs::read_dir(src)? { let e = e?; copy_tree(&e.path(), &dst.join(e.file_name()))?; } }
+    else { std::fs::copy(src, dst)?; ensure_private_file(dst)?; }
+    Ok(())
 }
 
 pub fn dispatcher_pid_path() -> PathBuf {
@@ -411,42 +400,20 @@ mod tests {
             COMPAT_RELEASE
         );
 
-        let fallback_home = root.join("fallback");
-        let fallback_legacy = root.join("fallback-legacy");
-        std::fs::create_dir_all(&fallback_legacy).unwrap();
-        std::fs::write(fallback_legacy.join("hub.db"), "db").unwrap();
-        std::fs::create_dir_all(&fallback_home).unwrap();
-        std::fs::write(
-            fallback_home.join(".legacy-fallback-release"),
-            COMPAT_RELEASE,
-        )
-        .unwrap();
-        let found = legacy_read_database(&fallback_home, &fallback_legacy)
-            .unwrap()
-            .unwrap();
-        assert!(found.0.ends_with("hub.db"));
-        std::fs::write(
-            fallback_home.join(".legacy-fallback-release"),
-            "old-release",
-        )
-        .unwrap();
-        assert!(legacy_read_database(&fallback_home, &fallback_legacy).is_err());
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
-    fn fallback_rejects_missing_or_invalid_markers_without_writing() {
+    fn legacy_state_is_not_read_without_migration() {
         let root = std::env::temp_dir().join(format!("a2a-fallback-marker-{}", std::process::id()));
         let legacy = root.join("legacy");
         let home = root.join("home");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("hub.db"), "legacy-db").unwrap();
-        assert!(legacy_read_database(&home, &legacy).is_err());
         assert!(!home.exists());
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join(".legacy-fallback-release"), "expired").unwrap();
-        assert!(legacy_read_database(&home, &legacy).is_err());
+        assert!(!home.join("hub.db").exists());
         assert_eq!(
             std::fs::read_to_string(legacy.join("hub.db")).unwrap(),
             "legacy-db"
@@ -499,26 +466,58 @@ mod tests {
     }
 
     #[test]
-    fn live_legacy_selects_one_owner_for_runtime_paths() {
+    fn live_legacy_never_selects_an_active_runtime_owner() {
         let root = std::env::temp_dir().join(format!("a2a-owner-{}", std::process::id()));
         let legacy = root.join("legacy");
         let canonical = root.join("canonical");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("sentinel"), "must-survive").unwrap();
         std::fs::write(
             legacy.join("hub.db.dispatcher.pid"),
             std::process::id().to_string(),
         )
         .unwrap();
+        assert!(migrate_legacy(&canonical, &legacy).is_err());
+        assert!(canonical.exists());
+        assert_eq!(
+            std::fs::read_to_string(canonical.join("sentinel")).unwrap(),
+            "must-survive"
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("hub.db.dispatcher.pid")).unwrap(),
+            std::process::id().to_string()
+        );
         let owner = resolve_runtime_home(&canonical, &legacy);
-        assert_eq!(owner.root, legacy);
-        assert!(owner.legacy);
+        assert_eq!(owner.root, canonical);
+        assert!(!owner.legacy);
         let pid = runtime_paths(&owner).pid;
         assert!(
             std::env::var_os("A2A_DISPATCHER_PID")
-                .map_or(pid == legacy.join("hub.db.dispatcher.pid"), |value| pid
+                .map_or(pid == canonical.join("dispatcher.pid"), |value| pid
                     == PathBuf::from(value))
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_rejects_relative_and_non_directory_roots_without_touching_destination() {
+        let root = std::env::temp_dir().join(format!("a2a-unsafe-root-{}", std::process::id()));
+        let legacy = root.join("legacy");
+        let home = root.join("home");
+        let relative = PathBuf::from(format!(".a2a-relative-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&relative);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("hub.db"), "db").unwrap();
+        std::fs::write(&relative, "relative file").unwrap();
+        assert!(migrate_legacy(&relative, &legacy).is_err());
+        assert_eq!(std::fs::read_to_string(legacy.join("hub.db")).unwrap(), "db");
+        std::fs::remove_file(&relative).unwrap();
+        std::fs::write(&home, "not a directory").unwrap();
+        assert!(migrate_legacy(&home, &legacy).is_err());
+        assert_eq!(std::fs::read_to_string(legacy.join("hub.db")).unwrap(), "db");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -203,20 +203,8 @@ pub struct Hub {
 
 impl Hub {
     pub fn open(db_path: &Path, agent_dir: &Path) -> Result<Self, String> {
-        let live_legacy = std::env::var_os("A2A_DB").is_none()
-            && crate::paths::resolve_runtime_home(
-                &crate::paths::runtime_home(),
-                &crate::paths::legacy_home(),
-            )
-            .legacy;
-        let conn = if live_legacy {
-            db::open_read_compat(db_path)?.0
-        } else {
-            db::open(db_path)?
-        };
-        if !live_legacy {
-            seed_agent_cards(&conn, agent_dir);
-        }
+        let conn = db::open(db_path)?;
+        seed_agent_cards(&conn, agent_dir);
         Ok(Hub { conn })
     }
 

@@ -614,7 +614,10 @@ fn init_opencode(args: &[String]) -> i32 {
     }
     let (mut written, mut skipped) = (0, 0);
     for (target, contents) in items {
-        match install(&target, contents, force) {
+        // Managed plugin files must refresh on every init so an older installed TUI cannot keep
+        // reading the pre-canonical tabs path. User-authored agents/commands remain opt-in force.
+        let managed_plugin = target.starts_with(root.join("plugins").join("a2a"));
+        match install(&target, contents, force || managed_plugin) {
             Ok(true) => written += 1,
             Ok(false) => skipped += 1,
             Err(e) => {
@@ -878,6 +881,11 @@ mod tests {
                 && dir.join("plugins/a2a/panel-logic.ts").exists()
         );
         assert!(dir.join("a2a/codetypera2a.path").exists());
+        let tui = dir.join("plugins/a2a/tui.ts");
+        std::fs::write(&tui, "stale legacy tabs reader").unwrap();
+        assert_eq!(init(&a), 0);
+        let refreshed = std::fs::read_to_string(&tui).unwrap();
+        assert!(refreshed.contains("runtime-home") && refreshed.contains("tabsFile"));
         let cfg: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap())
                 .unwrap();

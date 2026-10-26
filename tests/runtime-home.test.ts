@@ -17,16 +17,16 @@ test("tabs.jsonl follows A2A_DB, then CODETYPERA2A_HOME, then ~/.codetypera2a", 
   expect(runtimeFile("tabs.jsonl", env())).toBe("/home/u/.codetypera2a/tabs.jsonl");
 });
 
-test("the legacy config folder is used only when the new file is absent and the legacy one present", () => {
+test("legacy config files never become an active runtime fallback", () => {
   const legacy = `${CFG}/a2a/tabs.jsonl`;
-  expect(runtimeFile("tabs.jsonl", env({}, [legacy]))).toBe(legacy);
+  expect(runtimeFile("tabs.jsonl", env({}, [legacy]))).toBe("/home/u/.codetypera2a/tabs.jsonl");
   expect(runtimeFile("tabs.jsonl", env({}, [legacy, "/home/u/.codetypera2a/tabs.jsonl"]))).toBe("/home/u/.codetypera2a/tabs.jsonl");
   expect(runtimeFile("tabs.jsonl", env({}, []))).toBe("/home/u/.codetypera2a/tabs.jsonl");
 });
 
 test("codetypera2a.path uses the same order", () => {
   expect(runtimeFile("codetypera2a.path", env({ CODETYPERA2A_HOME: "/h" }))).toBe("/h/codetypera2a.path");
-  expect(runtimeFile("codetypera2a.path", env({}, [`${CFG}/a2a/codetypera2a.path`]))).toBe(`${CFG}/a2a/codetypera2a.path`);
+  expect(runtimeFile("codetypera2a.path", env({}, [`${CFG}/a2a/codetypera2a.path`]))).toBe("/home/u/.codetypera2a/codetypera2a.path");
 });
 
 test("binPath reads the recorded binary and falls back to PATH when empty or unreadable", () => {
