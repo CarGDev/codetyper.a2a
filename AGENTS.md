@@ -19,10 +19,10 @@
 The version lives in `Cargo.toml` and in the `codetypera2a` entry of `Cargo.lock`.
 
 - At the start of a work stream, decide its size once. A **big change** (new architecture, breaking behavior) starts a new
-  MAJOR, for example `2.1.x` to `3.0.0`. Anything smaller stays in the current minor, for example `2.1.x`.
+  MAJOR, for example `2.1.17` to `3.0.0`. Anything smaller stays in the current minor, for example `2.1.17`.
 - Every prompt iteration that changes the product bumps the **PATCH**: `2.1.11` to `2.1.12`, `3.0.0` to `3.0.1`.
-- Documentation shows the line, never a patch, until release: `3.0.x` or `2.1.x` (the `CHANGELOG.md` heading is
-  `## [2.1.x] - unreleased`, the README badge and the `--version` example say `2.1.x`).
+- Documentation shows the line, never a patch, until release: `3.0.x` or `2.1.17` (the `CHANGELOG.md` heading is
+  `## [2.1.17] - unreleased`, the README badge and the `--version` example say `2.1.17`).
 - After a change, reinstall (`cargo install --path . --force`) so the installed binary has the new version.
 
 ## 3. Going to production: only when the user says so

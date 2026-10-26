@@ -257,7 +257,7 @@ fn the_repository_rules_for_agents_exist_and_are_not_confused_with_the_templates
     let agents_md = std::fs::read_to_string(root().join("AGENTS.md")).unwrap();
     let top: String = agents_md.lines().take(8).collect::<Vec<_>>().join(" ");
     assert!(top.contains("not an agent template"), "AGENTS.md must say it is not a template");
-    for rule in ["Git is read-only", "Never run `git commit`", "PATCH", "`2.1.x`", "Going to production", "Print the git commands"] {
+    for rule in ["Git is read-only", "Never run `git commit`", "PATCH", "`2.1.17`", "Going to production", "Print the git commands"] {
         assert!(agents_md.contains(rule) || agents_md.to_lowercase().contains(&rule.to_lowercase()), "AGENTS.md lacks: {rule}");
     }
     let claude_md = std::fs::read_to_string(root().join("CLAUDE.md")).unwrap();
