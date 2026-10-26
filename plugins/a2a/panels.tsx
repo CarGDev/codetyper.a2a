@@ -11,28 +11,15 @@
 import { createSignal, For, Show } from "solid-js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   barParts, capped, changes, EMPTY, frontmatterColor, glyph, hashColor, isOpen, progressLabel, statusLine, STATE_COLOR, waiting,
   type Snapshot, type Task,
 } from "./panel-logic.ts";
+import { a2aBin, configDir } from "./runtime-home.ts";
 
 const MUTED = "#7f849c";
 const WARN = "#e0af68";
-
-const configDir = (): string =>
-  process.env.OPENCODE_CONFIG_DIR || path.join(os.homedir(), ".config", "opencode");
-
-const a2aBin = (): string => {
-  try {
-    const p = fs.readFileSync(path.join(configDir(), "a2a", "codetypera2a.path"), "utf8").trim();
-    if (p) return p;
-  } catch {
-    // not recorded: PATH
-  }
-  return "codetypera2a";
-};
 
 const oc = (args: string[]): Promise<{ ok: boolean; out: string }> =>
   new Promise((resolve) => {

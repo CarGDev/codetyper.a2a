@@ -296,7 +296,7 @@ fails, print the ledger at the end of the reply.
 
 ## A2A
 
-Your agent name is `orchestrator`. Guide: `~/.config/opencode/a2a/PROTOCOL.md`.
+Your agent name is `orchestrator`. Guide: `~/.codetypera2a/PROTOCOL.md`.
 
 - Always pass `directory:"<your cwd>"` to `a2a_inbox` and `a2a_send_message`.
 - Start of work: `a2a_inbox {agent:"orchestrator", as:"requester"}` to pick up anything finished while you were away.

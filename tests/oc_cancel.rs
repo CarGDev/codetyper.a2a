@@ -27,6 +27,7 @@ fn oc(dir: &Path, args: &[&str]) -> (String, bool) {
         .args(args)
         .env("A2A_DB", dir.join("hub.db"))
         .env("A2A_DISPATCHER_PID", dir.join("d.pid"))
+        .env("A2A_CLAUDE_RUNS_DIR", dir.join("claude-runs"))
         .env("OPENCODE_BIN", dir.join("opencode"))
         .env_remove("TMUX")
         .env_remove("TMUX_PANE")
@@ -129,11 +130,9 @@ fn cancel_all_cancels_open_tasks_kills_pending_nudges_and_interrupts_the_running
         "the running session is interrupted once"
     );
     // nothing left to do
-    assert!(
-        oc(&dir, &["cancel", "--all", "--yes"])
-            .0
-            .contains("no open tasks")
-    );
+    assert!(oc(&dir, &["cancel", "--all", "--yes"])
+        .0
+        .contains("no open tasks"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -261,5 +260,35 @@ fn shutdown_can_be_disabled() {
             "completed"
         ]
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shutdown_of_the_last_opencode_leaves_everything_while_a_claude_turn_is_alive() {
+    let dir = sandbox("shutdown-claude");
+    let c = seed(&dir);
+    let (mut me, mut turn) = (live_sleeper(), live_sleeper());
+    let clients = dir.join("d.pid.clients");
+    std::fs::create_dir_all(&clients).unwrap();
+    std::fs::write(clients.join(me.id().to_string()), "").unwrap();
+    let runs = dir.join("claude-runs");
+    std::fs::create_dir_all(&runs).unwrap();
+    std::fs::write(runs.join("s1.pid"), turn.id().to_string()).unwrap();
+    let (out, ok) = oc(&dir, &["shutdown", "--client", &me.id().to_string()]);
+    assert!(
+        ok && out.trim().is_empty(),
+        "silent, nothing touched: {out}"
+    );
+    assert_eq!(
+        states(&c),
+        [
+            "submitted",
+            "working",
+            "input-required",
+            "auth-required",
+            "completed"
+        ]
+    );
+    let _ = (me.kill(), turn.kill(), me.wait(), turn.wait());
     let _ = std::fs::remove_dir_all(&dir);
 }

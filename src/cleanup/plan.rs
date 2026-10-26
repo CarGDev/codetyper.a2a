@@ -226,7 +226,7 @@ mod tests {
             claude_root: "/h/.claude".into(),
             claude_json: "/h/.claude.json".into(),
             opencode_dir: "/h/.config/opencode".into(),
-            runtime_homes: vec!["/h/.codetypera2a".into(), "/h/.config/opencode/a2a".into()],
+            runtime_homes: vec!["/h/.codetypera2a".into()],
             temp_dir: "/t".into(),
             processes: vec![(7, "/h/.cargo/bin/oc dispatch".into())],
             exe: Some("/h/.cargo/bin/codetypera2a".into()),
@@ -293,7 +293,7 @@ mod tests {
             "a project folder named a2a"
         );
         assert!(looks_like_our_home(
-            Path::new("/h/.config/opencode/a2a"),
+            Path::new("/h/.codetypera2a"),
             &none
         ));
         assert!(looks_like_our_home(Path::new("/h/work"), &marked));
@@ -340,7 +340,7 @@ mod tests {
         );
         assert!(
             has(Action::Remove("/h/.codetypera2a".into()))
-                && has(Action::Remove("/h/.config/opencode/a2a".into()))
+                && has(Action::Remove("/h/.codetypera2a".into()))
         );
         assert!(has(Action::EditRc("/h/.zshrc".into())) && has(Action::CargoUninstall));
         assert!(

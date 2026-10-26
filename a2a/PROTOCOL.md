@@ -4,7 +4,7 @@ Every agent works in its own opencode session, shown as a tab in the opencode yo
 open (switch tabs with Ctrl+Tab), so agents cannot call each other directly. They talk through a
 shared hub: an MCP server registered as `a2a` in `opencode.jsonc` (`codetypera2a hub`).
 Its semantics follow the A2A spec (AgentCard, Task lifecycle, Message + Parts, Artifact,
-contextId). State is one SQLite file (`~/.config/opencode/a2a/hub.db`), shared by every
+contextId). State is one SQLite file (`~/.codetypera2a/hub.db`), shared by every
 opencode window.
 
 ## Tools (shown to you as `a2a_<name>`)

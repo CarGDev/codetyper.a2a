@@ -1,0 +1,15 @@
+{
+  "name": "a2a-pane",
+  "version": "0.1.0",
+  "author": { "name": "codetypera2a" },
+  "description": "Live A2A pane for Claude Code: dispatcher state, tasks in flight, who talks to whom, the latest messages and the questions waiting for you.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "exe": {
+      "type": "string",
+      "title": "codetypera2a binary",
+      "description": "Path of the codetypera2a binary (init --claude prints the exact install command with it)",
+      "default": "codetypera2a"
+    }
+  }
+}

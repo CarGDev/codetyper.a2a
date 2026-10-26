@@ -162,7 +162,7 @@ keeps the previous version as a versioned formula.
 
 Open an issue with your OS, `opencode --version`, `codetypera2a help | head -1`, what you ran, what you
 expected and what happened. For dispatcher problems include the last lines of
-`~/.config/opencode/a2a/hub.db.dispatcher.log` and the output of `oc status`.
+`~/.codetypera2a/hub.db.dispatcher.log` and the output of `oc status`.
 
 ## Adding an agent runtime
 

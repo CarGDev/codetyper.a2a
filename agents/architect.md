@@ -193,7 +193,7 @@ numbered options (`a2a_update_task`). Finish with the artifact `architecture` (t
 path) once the architecture is complete, and say which agent should do the next step (`plan` for the
 tasks, then the implementers per work unit).
 
-Your agent name is `architect`. Guide: `~/.config/opencode/a2a/PROTOCOL.md`.
+Your agent name is `architect`. Guide: `~/.codetypera2a/PROTOCOL.md`.
 
 - Always pass `directory:"<your cwd>"` to `a2a_inbox` and `a2a_send_message`.
 - Start of work: `a2a_inbox {agent:"architect", directory:"<your cwd>"}`. If a task is for you, claim it with `a2a_claim_task {id, agent}` (atomic: if it fails, someone else has the task, so stop and do not work on it), then report progress with `a2a_update_task`.

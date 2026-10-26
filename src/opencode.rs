@@ -314,7 +314,23 @@ pub fn create_session(body: &Value) -> Result<String, String> {
 
 /// File the dispatcher appends to and the TUI plugin tails to open session tabs.
 pub fn tabs_file() -> std::path::PathBuf {
-    crate::paths::db_path().with_file_name("tabs.jsonl")
+    tabs_file_from(std::env::var_os("A2A_TABS").filter(|v| !v.is_empty()).map(Into::into))
+}
+
+fn tabs_file_from(explicit: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    explicit.unwrap_or_else(|| crate::paths::db_path().with_file_name("tabs.jsonl"))
+}
+
+#[cfg(test)]
+mod tabs_tests {
+    use super::*;
+
+    #[test]
+    fn a2a_tabs_wins_else_the_file_sits_next_to_the_database() {
+        let x = std::path::PathBuf::from("/x/t.jsonl");
+        assert_eq!(tabs_file_from(Some(x.clone())), x);
+        assert_eq!(tabs_file_from(None).file_name().unwrap(), "tabs.jsonl");
+    }
 }
 
 /// Every `provider/model` opencode can use right now (`opencode models`).

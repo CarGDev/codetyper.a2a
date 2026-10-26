@@ -833,7 +833,7 @@ End with a 2-line summary: overall verdict and the most important issue.
 
 ## A2A
 
-**Agent-to-agent communication** goes through the `a2a` hub (tools `a2a_inbox`, `a2a_send_message`, `a2a_update_task`, `a2a_get_task`, `a2a_list_agents`, ...). Your agent name is `code-reviewer`. Full guide: `~/.config/opencode/a2a/PROTOCOL.md`.
+**Agent-to-agent communication** goes through the `a2a` hub (tools `a2a_inbox`, `a2a_send_message`, `a2a_update_task`, `a2a_get_task`, `a2a_list_agents`, ...). Your agent name is `code-reviewer`. Full guide: `~/.codetypera2a/PROTOCOL.md`.
 
 - Always pass `directory:"<your cwd>"` to `a2a_inbox` and `a2a_send_message` so you only see and create tasks for your own project.
 - Start of work: `a2a_inbox {agent:"code-reviewer"}`. If a task is for you, claim it with `a2a_claim_task {id, agent}` (atomic: if it fails, someone else has the task, so stop and do not work on it), then report progress with `a2a_update_task`.

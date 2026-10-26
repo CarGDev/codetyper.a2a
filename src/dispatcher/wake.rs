@@ -240,6 +240,19 @@ mod tests {
         assert!(!cooling_down("%2", now, &last));
     }
 
+    /// The fake screen is drawn by a child process; wait for it (at most 3 s) instead of racing it.
+    fn wait_until_claude_like(pane: &str) -> Result<(), String> {
+        let mut last = String::new();
+        for _ in 0..60 {
+            last = screen_of(pane).unwrap_or_default();
+            if looks_like_claude(&last) {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(last)
+    }
+
     /// Against a real tmux pane running `cat`: the nudge arrives whole, once, and is submitted.
     #[test]
     fn a_nudge_is_pasted_whole_into_a_real_pane() {
@@ -249,6 +262,7 @@ mod tests {
         let name = format!("a2a-wake-test-{}", std::process::id());
         let started = Command::new("tmux")
             .args([
+                "-u",
                 "new-session",
                 "-d",
                 "-s",
@@ -267,6 +281,7 @@ mod tests {
         }
         let pane = sys::tmux(&["display-message", "-p", "-t", &name, "#{pane_id}"]).unwrap();
         let pane = pane.trim().to_string();
+        let ready = wait_until_claude_like(&pane);
         let text = "A2A: task 1234 that you sent to \"mentor\" is now completed. Call get_task {id:\"1234\"}, judge the result.";
         let sent = inject(&pane, text);
         std::thread::sleep(Duration::from_millis(300));
@@ -275,11 +290,12 @@ mod tests {
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &name])
             .status();
+        assert!(ready.is_ok(), "fake Claude screen never drew: {ready:?}");
         assert_eq!(sent, Ok(true));
         assert_eq!(second, Ok(false), "a second nudge waits out the cooldown");
         assert!(
             screen.matches(text).count() >= 1,
-            "nudge missing or garbled: {screen}"
+            "nudge missing or garbled (sent={sent:?}): {screen}"
         );
     }
 }

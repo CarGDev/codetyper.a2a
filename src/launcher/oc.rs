@@ -16,7 +16,8 @@
 //!   oc shutdown [--force]
 //!                       end this setup: cancel open tasks, interrupt running turns, retire the
 //!                       sessions, stop the dispatcher and close the status tab. Runs by itself when
-//!                       the last opencode started through `oc` exits (A2A_KEEP_RUNNING=1 disables)
+//!                       the last opencode started through `oc` exits, unless Claude Code work is still
+//!                       live; A2A_KEEP_RUNNING=1 disables, --force ends it regardless)
 //!   oc status --json [--dir <folder>]
 //!                       the same as JSON (tasks, questions, progress, today's cost) for the panel plugin
 //!   oc messages --json [--since <iso>] [--limit N]
@@ -58,7 +59,8 @@ COMMANDS:
   oc cancel <task>...   cancel the given tasks (id or 8-char prefix); also --context <ctx>,
                         --dir <folder>; --no-interrupt keeps running turns going; --yes skips asking
   oc shutdown           cancel open tasks, stop running turns and the dispatcher (automatic when
-                        the last opencode started with `oc` exits; --force ignores other opencodes)
+                        the last opencode started with `oc` exits and no Claude work is live;
+                        --force ignores other opencodes and Claude work)
   oc status --json      the same as JSON (tasks, questions, progress, today's cost, diagnostics); --dir <folder>
   oc messages --json    the latest task messages, newest first; --since <iso>, --limit N (default 50)
   oc answer <task> <text>
@@ -419,11 +421,14 @@ fn shutdown_if_last(me: u32, force: bool) -> i32 {
     }
     let others: Vec<u32> = live_clients().into_iter().filter(|p| *p != me).collect();
     // silent: this runs on every opencode exit and its output can land in the dispatcher log
-    if !force && !others.is_empty() {
+    if !force && (!others.is_empty() || super::live_work::claude_work_live()) {
         return 0;
     }
     shutdown()
 }
+
+/// tmux target for the live-status window: `=` makes the name match exactly, never as a prefix.
+const STATUS_WINDOW_EXACT: &str = "=a2a-status";
 
 /// Cancel open tasks, interrupt every running turn, retire the sessions, stop the dispatcher and
 /// close the live-status tab.
@@ -451,7 +456,7 @@ fn shutdown() -> i32 {
     }
     crate::dispatcher::dispatcher::stop_all();
     crate::dispatcher::dispatcher::sweep_unregistered();
-    let _ = sys::tmux(&["kill-window", "-t", "a2a-status"]);
+    let _ = sys::tmux(&["kill-window", "-t", STATUS_WINDOW_EXACT]);
     println!(
         "a2a stopped: tasks canceled, turns interrupted, sessions retired, dispatcher stopped"
     );

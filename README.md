@@ -13,7 +13,7 @@
 
 <p>
 <a href="https://github.com/CarGDev/codetyper.a2a/releases"><img src="https://img.shields.io/github/v/release/CarGDev/codetyper.a2a?style=for-the-badge&label=release" alt="Latest release"></a>
-<img src="https://img.shields.io/badge/version-2.1.14-2ac3de?style=for-the-badge" alt="Version 2.1.14">
+<img src="https://img.shields.io/badge/version-2.1.x-2ac3de?style=for-the-badge" alt="Version 2.1.x">
 <img src="https://img.shields.io/badge/Rust-1.85%2B-f74c00?style=for-the-badge&logo=rust&logoColor=white" alt="Rust 1.85+">
 <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-7aa2f7?style=for-the-badge" alt="Platform">
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge" alt="License: Apache 2.0"></a>
@@ -76,7 +76,7 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 | `oc stop`              | stop every dispatcher of this database (after an upgrade `oc` then starts the current one) |
 | `oc continue <ctx>`    | allow more hops for a context that hit the hop cap                  |
 | `oc trace <task>`      | timeline of one task (id or 8-character prefix): sender, claim, delivery, state changes, duration |
-| `oc shutdown`          | end everything: cancel open tasks, interrupt running turns, retire sessions, stop the dispatcher (runs automatically when the last opencode exits; `A2A_KEEP_RUNNING=1` disables) |
+| `oc shutdown`          | end everything: cancel open tasks, interrupt running turns, retire sessions, stop the dispatcher (runs automatically when the last opencode exits, unless a Claude Code turn or an open task on a Claude agent is still live, in which case the dispatcher and the `a2a-status` window stay up; `A2A_KEEP_RUNNING=1` disables, `--force` ends everything) |
 | `oc cancel`            | cancel open tasks (`--all`, task ids, `--context`, `--dir`) and interrupt the turns working on them |
 | `oc stats`             | coloured per-agent table, most tokens first, with a share bar: tasks, average duration (`3m 46s`), tokens in/out (`1.3M/13.1k`) and cost (opencode's figure, or an estimate from the price table when it reports 0); unknown values stay blank |
 | `oc stats --model`     | the same table per model, one titled table per tool (`opencode`, `claude code`), each with its own total (read from the `events.model` / `events.source` columns of the hub database, schema v6): tokens in/out, share bar, cost, turns, tasks and agents that used it; opencode events without a recorded model are grouped as `unknown`. It first reads new Claude Code transcripts (`$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/**/*.jsonl`) into the hub, once per message id, so reruns add nothing; the `claude code` table shows `in` (non-cached input), `out` and `cache r/w` apart, with `sessions` instead of `tasks` (schema v6), and its cost is an estimate that prices cache reads at 0.1x and cache writes at 1.25x (5 minutes) / 2x (1 hour) of the input price, blank for models the price table does not list. Transcripts omit some calls Claude Code bills (side queries), so totals can sit below `/usage`. A transcript that cannot be read only prints a warning |
@@ -188,7 +188,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 2.1.14
+codetypera2a --version        # codetypera2a 2.1.x
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
@@ -262,7 +262,7 @@ The footer reads like `a2a ● · 2 tasks: orchestrator>coder, coder>tester · 1
 dispatcher is up, the hub tasks in flight (from/to) and the subagents Claude Code is running right now. It is
 `oc statusline`, a single fast line that reads the hub read-only and exits 0 whatever it is given; the two hooks
 run `oc statusline --hook start|stop`, which keep one small file per running subagent in
-`~/.config/opencode/a2a/statusline-subagents/` (entries older than 10 minutes are ignored). To turn it off, remove
+`~/.codetypera2a/statusline-subagents/` (entries older than 10 minutes are ignored). To turn it off, remove
 the `statusLine` key and the four `oc statusline` hooks from `settings.json`; `init` re-adds them on its next run
 unless you already have a status line of your own. A hook or status line of ours whose binary path is gone (the
 binary moved) is repaired on the next run; yours are never touched.
@@ -392,7 +392,7 @@ codetypera2a reinstall --yes      # same, keeps this binary, runs init --yes, th
 Written in Rust, no scripts. It deletes the agent and command files `init` installed in `~/.claude` and the opencode config dir
 (only those template files and their `.bak-a2a` copies; agents and commands you wrote are never touched), the A2A pane, our MCP entries (`a2a` and the companions `init` added), `default_agent`, the Ollama providers, our
 status line, hooks and plugin entries, the shell-rc block, both runtime homes with every database (the legacy
-`~/.config/opencode/a2a` too), the `a2a-status` tmux window, every dispatcher (`codetypera2a dispatcher`, `oc dispatch`)
+`~/.codetypera2a` too), the `a2a-status` tmux window, every dispatcher (`codetypera2a dispatcher`, `oc dispatch`)
 and, for `uninstall`, the binary and the `oc` link (also `cargo uninstall` / `brew uninstall`). The binary is removed only from
 a cargo or Homebrew location (never a build folder or a copy you placed by hand), `oc` only when it is a link to that binary,
 and a runtime home only when it is named `.codetypera2a`, is the legacy `<opencode dir>/a2a`, or holds our files. Your own entries in
@@ -421,7 +421,7 @@ the agent and command files `init` wrote to `~/.claude/{agents,commands}`, and t
 | agent templates (`agents/`)                | `~/.config/opencode/agents/`                      |
 | slash commands (`commands/`)               | `~/.config/opencode/commands/` (`/plan-new` ...)  |
 | tabs plugin (`plugins/a2a/tui.ts`)         | `~/.config/opencode/plugins/a2a/`                 |
-| `PROTOCOL.md`, `model-policy.json`         | `~/.config/opencode/a2a/`                         |
+| `PROTOCOL.md`, `model-policy.json`         | `~/.codetypera2a/`                         |
 | MCP servers `a2a`, `codegraph`, `context7`, `engram`, `playwright` + `default_agent` | `opencode.jsonc` (`mcp.servers`, backup kept; existing entries are never overwritten, except that a dead `a2a` binary path is repaired) |
 | `oc` symlink                               | next to the binary                                |
 
@@ -444,7 +444,7 @@ src/ollama.rs    Ollama discovery and the opencode provider entries `init` write
 src/stats_view.rs  `oc stats` and `oc stats --model` tables
 ```
 
-State: `~/.config/opencode/a2a/hub.db` (+ `.dispatcher.pid`, `.dispatcher.log`).
+State: `~/.codetypera2a/hub.db` (+ `.dispatcher.pid`, `.dispatcher.log`).
 Env overrides: `A2A_DB`, `A2A_AGENT_DIR`, `A2A_POLICY`, `OPENCODE_BIN`, `DISPATCH_*`.
 
 ## Choosing models
@@ -505,7 +505,7 @@ it. `init` does not overwrite an existing policy file (add `--force`).
   cancel as the requester; the runtime passes it as a one-shot 0600 file in `A2A_CREDENTIAL_FILE`. Without the file
   nothing changes; with it and no valid credential, task creation is denied. Anyone who can delete that file or change
   the runtime home can switch it off, so keep both private.
-- Task messages are stored in a local SQLite file (`~/.config/opencode/a2a/hub.db`): never put secrets
+- Task messages are stored in a local SQLite file (`~/.codetypera2a/hub.db`): never put secrets
   in them.
 
 See [SECURITY.md](SECURITY.md) to report a vulnerability privately.

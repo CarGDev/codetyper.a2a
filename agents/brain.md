@@ -170,7 +170,7 @@ Show the ledger when asked ("agent: status") and at the end of a task.
 
 ## A2A
 
-`brain` uses the `a2a` hub as a **task queue and result inbox**; it still never executes work or calls agents itself. Guide: `~/.config/opencode/a2a/PROTOCOL.md`.
+`brain` uses the `a2a` hub as a **task queue and result inbox**; it still never executes work or calls agents itself. Guide: `~/.codetypera2a/PROTOCOL.md`.
 
 - Dispatch: for each step, create a task with `a2a_send_message {from:"brain", to:"<agent>", text:<the full PROMPT + REPORT BACK>, contextId:"<task-slug>", directory:"<target project folder>"}` (for a task in ANOTHER project also pass `fromDirectory:"<my cwd>"`). Then the PROMPT you give the user is short: `Open the <agent> tab and say: "Check your A2A inbox (agent: <agent>) and handle task <id>."` Also show the full PROMPT text so the user can paste it if the tools are unavailable in that tab.
 - Collect: when the user returns (or says `agent: status`), call `a2a_inbox {agent:"brain", as:"requester"}` and `a2a_list_tasks {contextId}`; read artifacts with `a2a_get_task`. Judge results from the artifact, not from memory.

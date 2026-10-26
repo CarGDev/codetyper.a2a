@@ -40,7 +40,7 @@ Out of scope: problems in opencode itself, in the model providers, or in the com
 
 - Sessions the dispatcher opens use **your opencode permissions**; there is no sandbox. Agents run with the
   tools you give them, so review the `tools:` and `permission:` blocks of any agent you add.
-- Task messages are stored in plain text in `~/.config/opencode/a2a/hub.db`. Never put secrets in them.
+- Task messages are stored in plain text in `~/.codetypera2a/hub.db`. Never put secrets in them.
 - `init --force` and `models` rewrite files in your opencode config directory; a backup of
   `opencode.jsonc` is kept next to it (`opencode.jsonc.bak-a2a`, `opencode.jsonc.bak-a2a-models`).
 - `init --claude` edits `~/.claude.json` in place (or `<dir>/.claude.json` with `CLAUDE_CONFIG_DIR`) and writes

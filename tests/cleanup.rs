@@ -104,7 +104,7 @@ fn uninstall_deletes_everything_and_reinstall_ends_clean() {
     assert!(out.status.success(), "{}", text(&out));
     let gone = |p: &str| !home.join(p).exists();
     assert!(
-        gone(".codetypera2a") && gone(".config/opencode/a2a") && gone(".claude/.a2a-manifest.json")
+        gone(".codetypera2a") && gone(".codetypera2a") && gone(".claude/.a2a-manifest.json")
     );
     assert!(gone(".claude/a2a-marketplace") && gone(".config/opencode/plugins/a2a"));
     let leftover = |dir: &str| {
@@ -142,7 +142,7 @@ fn uninstall_deletes_everything_and_reinstall_ends_clean() {
     assert!(out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("verified"), "{}", text(&out));
     assert!(
-        !home.join(".config/opencode/a2a/hub.db").exists(),
+        !home.join(".codetypera2a/hub.db").exists(),
         "no legacy database"
     );
     let _ = std::fs::remove_dir_all(home);

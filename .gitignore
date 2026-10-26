@@ -4,3 +4,6 @@ hub.db*
 *.log
 *.dbml
 .*
+!plugins/claude-a2a/.claude-plugin/
+!plugins/claude-a2a/.claude-plugin/plugin.json
+!AGENTS.md

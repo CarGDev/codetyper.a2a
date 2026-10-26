@@ -1,42 +1,16 @@
 // a2a tabs: shows every agent's session as a tab in this opencode.
 //
 // The A2A dispatcher gives each agent its own session (one per agent per project) and appends a
-// line to `tabs.jsonl` next to the hub database whenever it hands that agent work:
+// line to `tabs.jsonl` in the runtime home (`~/.codetypera2a`) whenever it hands that agent work:
 //   {"sessionID":"ses_...","agent":"mentor","directory":"/path/to/project","at":"..."}
 // This plugin tails that file and opens the session as a tab (`context.ui.tabs.open`, which does
 // not steal focus) when the project matches the folder opencode was started in.
 // Docs: https://opencode.ai/v2/docs/build/plugins/cli (Plugin.define, context.ui.tabs).
 import { Plugin } from "@opencode/plugin/tui";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-
-const tabsFile = (): string => {
-  const config = configDir();
-  const db = process.env.A2A_DB || path.join(config, "a2a", "hub.db");
-  return path.join(path.dirname(db), "tabs.jsonl");
-};
-
-const configDir = (): string => {
-  return (
-    process.env.OPENCODE_CONFIG_DIR ||
-    path.join(os.homedir(), ".config", "opencode")
-  );
-};
-
-// The binary `init` recorded (it may not be on opencode's PATH), else `codetypera2a` from PATH.
-const a2aBin = (): string => {
-  try {
-    const p = fs
-      .readFileSync(path.join(configDir(), "a2a", "codetypera2a.path"), "utf8")
-      .trim();
-    if (p) return p;
-  } catch {
-    // not recorded: fall back to PATH
-  }
-  return "codetypera2a";
-};
+import { a2aBin, tabsFile } from "./runtime-home.ts";
 
 const sameProject = (dir: string, cwd: string): boolean => {
   return (

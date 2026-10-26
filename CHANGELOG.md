@@ -4,7 +4,19 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.1.x] - [Unreleased]
+
+### Fixed
+
+- **Closing opencode no longer kills Claude work.** The automatic `oc shutdown` of the last opencode now keeps the
+  dispatcher and the `a2a-status` window while a Claude turn is running or a task is open for a Claude-backend
+  agent (`--force` and `A2A_KEEP_RUNNING=1` are unchanged), and closes the status window by its exact name.
+  The tab file also honors `A2A_TABS` on the dispatcher side, like the plugin.
+- **Agent tabs in opencode read the runtime home again.** The TUI plugin looked for `tabs.jsonl` and
+  `codetypera2a.path` in `<config>/a2a`, but the dispatcher writes them to `~/.codetypera2a` (since the runtime
+  home move), so no agent tab ever opened. The plugin now resolves them like the Rust side (`A2A_TABS`,
+  `A2A_DB`, `CODETYPERA2A_HOME`, `~/.codetypera2a`), with the legacy folder only as a fallback; the logic lives
+  in `plugins/a2a/runtime-home.ts` with `bun test tests/runtime-home.test.ts`. Claude keeps its tmux windows.
 
 ## [2.1.14] - 2026-10-25
 
