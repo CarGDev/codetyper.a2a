@@ -13,7 +13,7 @@
 
 <p>
 <a href="https://github.com/CarGDev/codetyper.a2a/releases"><img src="https://img.shields.io/github/v/release/CarGDev/codetyper.a2a?style=for-the-badge&label=release" alt="Latest release"></a>
-<img src="https://img.shields.io/badge/version-2.1.13-2ac3de?style=for-the-badge" alt="Version 2.1.13">
+<img src="https://img.shields.io/badge/version-2.1.14-2ac3de?style=for-the-badge" alt="Version 2.1.14">
 <img src="https://img.shields.io/badge/Rust-1.85%2B-f74c00?style=for-the-badge&logo=rust&logoColor=white" alt="Rust 1.85+">
 <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-7aa2f7?style=for-the-badge" alt="Platform">
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge" alt="License: Apache 2.0"></a>
@@ -188,7 +188,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 2.1.13
+codetypera2a --version        # codetypera2a 2.1.14
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of

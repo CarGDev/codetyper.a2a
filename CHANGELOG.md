@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [2.1.13] - 2026-10-25
+## [2.1.14] - 2026-10-25
 
 Claude Code becomes a full runtime for the hub: its agents are woken by the dispatcher, its usage and messages are
 visible, and `init` sets everything up in one command.
@@ -86,6 +86,7 @@ visible, and `init` sets everything up in one command.
   (`<runtime home>/claude-runs/<session>.pane`, validated ids, never for headless runs: they carry `A2A_HEADLESS`); when
   a task you sent changes state, the Claude backend types the one-line nudge into that pane (only while it is not
   mid-turn, otherwise it retries) instead of running a headless turn, so you no longer have to ask for status.
+- **CI:** the uninstall/reinstall integration test sets `SHELL` itself, so it no longer depends on the runner's shell.
 - **Claude turns no longer fail with "Credit balance is too low".** Headless `claude -p` turns start without
   `ANTHROPIC_API_KEY` when your `claude.ai` subscription is logged in, so they use it instead of an API key left in
   the shell. `A2A_CLAUDE_AUTH=auto|subscription|api` chooses (default `auto`: subscription if `claude auth status` shows

@@ -21,6 +21,7 @@ fn run(home: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
         .args(args)
         .env("HOME", home)
+        .env("SHELL", "/bin/zsh") // `init --shell` picks the rc file from $SHELL, which CI does not set
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("OPENCODE_CONFIG_DIR")
         .env_remove("CODETYPERA2A_HOME")
