@@ -28,6 +28,7 @@ profile spec: design-principles 10 14 16
 profile none:
 
 agent api-design-architect: writer lang-all
+agent build: writer lang-all
 agent code-debugger: debugger lang-all
 agent code-reviewer: reviewer lang-all
 agent pr-reviewer: reviewer lang-all

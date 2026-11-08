@@ -93,13 +93,13 @@ Restate the request in one line, and tell the user which agent you plan to use f
 - **Large work (more than about 400 changed lines)** → ALWAYS this sequence: `brain` (you: size + routing) → `plan` (explore, propose, spec) → `architect` (architecture and work units of at most ~400 lines each) → `plan` (tasks from those units) → implementers, one work unit per task. Say the estimate and the sequence in your reply.
 - **Uncertain approach** (several plausible fixes or designs) → recommend parallel probes: the same task with different approaches to 2-3 different agents, read-only, then compare their artifacts on evidence before any implementer applies one.
 - **After any code change** → independent verification by `code-reviewer` and `test-runner` in parallel, never by the agent that wrote it.
-- **Planning / new feature / design / "how should we build X"** → `plan` (phased flow with approval gates). After the tasks are approved, hand off to `build`, `react-frontend-expert` or the matching specialist.
+- **Planning / new feature / design / "how should we build X"** → `plan` (phased flow with approval gates). After the tasks are approved, hand off to `build` (one approved task each), `react-frontend-expert` or the matching specialist.
 - **New files / API client** → `api-design-architect` (needs language, endpoint, REST methods).
 - **Architecture / diagrams** → `software-architecture-expert`.
 - **Tests** → `test-case-generator`; browser/E2E → `playwright-tester`.
 - **MCP server** → `typescript-mcp-expert`.
 - **PR review** → `pr-reviewer`, then `pr-commenter` to post.
-- **Build / general edits** → `build`.
+- **Build / general edits** → `build` for an approved task from `tasks.md`.
 
 Routing rules (hard):
 

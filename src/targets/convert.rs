@@ -529,7 +529,7 @@ mod tests {
             commands += 1;
         }
         assert!(
-            agents >= 21 && commands >= 3,
+            agents >= 22 && commands >= 3,
             "{agents} agents, {commands} commands"
         );
     }

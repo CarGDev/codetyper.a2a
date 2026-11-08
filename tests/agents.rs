@@ -83,7 +83,48 @@ fn only_browser_agents_may_use_playwright() {
         }
         checked += 1;
     }
-    assert!(checked >= 20, "expected all agent templates, saw {checked}");
+    assert!(checked >= 22, "expected all agent templates, saw {checked}");
+}
+
+#[test]
+fn build_is_a_primary_executor_without_web_or_browser() {
+    let fm = frontmatter("build");
+    for needle in [
+        "mode: primary",
+        "  edit: true",
+        "  write: true",
+        "  bash: true",
+        "  webfetch: false",
+        "  task: false",
+        "\"playwright_*\": false",
+        "claude-sonnet-5.5",
+    ] {
+        assert!(fm.contains(needle), "build frontmatter lacks: {needle}");
+    }
+}
+
+#[test]
+fn build_body_forbids_replanning_scope_changes_and_commits() {
+    let text = std::fs::read_to_string(root().join("agents/build.md")).unwrap();
+    for needle in [
+        "tasks.md",
+        "No task, no build",
+        "input-required",
+        "Never edits plan.md, design.md or tasks.md",
+        "does not commit",
+        "Never re-plan",
+    ] {
+        assert!(text.contains(needle), "build.md lacks: {needle}");
+    }
+}
+
+#[test]
+fn orchestrator_and_brain_route_approved_tasks_to_build() {
+    let orchestrator = std::fs::read_to_string(root().join("agents/orchestrator.md")).unwrap();
+    let brain = std::fs::read_to_string(root().join("agents/brain.md")).unwrap();
+    assert!(orchestrator.contains("no task, no `build`"));
+    assert!(!orchestrator.contains("builder") && !brain.contains("builder"));
+    assert!(brain.contains("`build`"));
 }
 
 #[test]
@@ -161,7 +202,11 @@ struct Profiles {
 fn profiles() -> Profiles {
     let text = std::fs::read_to_string(root().join("docs/rules-profiles.txt")).unwrap();
     let mut parsed = Profiles::default();
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
         let (kind, rest) = line.split_once(' ').unwrap();
         let (name, value) = rest.split_once(':').unwrap();
         let words: Vec<String> = value.split_whitespace().map(String::from).collect();
@@ -203,9 +248,17 @@ fn expected_rules(name: &str, chunks: &[(String, String)], profiles: &Profiles) 
         expand(profiles, &profiles.members[profile], &mut ids);
     }
     for id in &ids {
-        assert!(chunks.iter().any(|(known, _)| known == id), "{name}: unknown rule id {id}");
+        assert!(
+            chunks.iter().any(|(known, _)| known == id),
+            "{name}: unknown rule id {id}"
+        );
     }
-    chunks.iter().filter(|(id, _)| ids.contains(id)).map(|(_, body)| body.as_str()).collect::<Vec<_>>().join("\n\n")
+    chunks
+        .iter()
+        .filter(|(id, _)| ids.contains(id))
+        .map(|(_, body)| body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[test]
@@ -218,37 +271,78 @@ fn every_agent_carries_exactly_the_rules_its_capabilities_call_for() {
             continue;
         }
         let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-        assert!(profiles.of_agent.contains_key(&name), "{name}: no entry in docs/rules-profiles.txt");
+        assert!(
+            profiles.of_agent.contains_key(&name),
+            "{name}: no entry in docs/rules-profiles.txt"
+        );
         let wanted = expected_rules(&name, &chunks, &profiles);
         let found = rules_block_in(&std::fs::read_to_string(&path).unwrap());
         match (wanted.is_empty(), found) {
             (true, None) => {}
             (true, Some(_)) => panic!("{name} must carry no coding rules"),
             (false, None) => panic!("{name}: rules block missing"),
-            (false, Some(found)) => assert_eq!(found, wanted, "{name} drifted from docs/engineering-rules.md"),
+            (false, Some(found)) => assert_eq!(
+                found, wanted,
+                "{name} drifted from docs/engineering-rules.md"
+            ),
         }
         checked += 1;
     }
-    assert!(checked >= 21, "expected every agent template, found {checked}");
+    assert!(
+        checked >= 22,
+        "expected every agent template, found {checked}"
+    );
 }
 
 #[test]
 fn rules_match_what_each_agent_can_do() {
     let (chunks, profiles) = (rule_chunks(), profiles());
     let has = |name: &str, needle: &str| expected_rules(name, &chunks, &profiles).contains(needle);
-    for name in ["brain", "mentor", "orchestrator", "summarizer", "doc-lookup", "git-historian", "pr-commenter"] {
-        assert!(expected_rules(name, &chunks, &profiles).is_empty(), "{name} writes no code");
+    for name in [
+        "brain",
+        "mentor",
+        "orchestrator",
+        "summarizer",
+        "doc-lookup",
+        "git-historian",
+        "pr-commenter",
+    ] {
+        assert!(
+            expected_rules(name, &chunks, &profiles).is_empty(),
+            "{name} writes no code"
+        );
     }
     for name in ["architect", "software-architecture-expert", "plan"] {
-        assert!(!has(name, "Prohibited:") && !has(name, "arrow functions"), "{name} never codes");
+        assert!(
+            !has(name, "Prohibited:") && !has(name, "arrow functions"),
+            "{name} never codes"
+        );
     }
-    assert!(!has("test-runner", "Prohibited:"), "test-runner only runs tools");
-    for name in ["react-frontend-expert", "typescript-mcp-expert", "playwright-tester"] {
-        assert!(!has(name, "**Python**") && !has(name, "**Go**") && !has(name, "SQLite"), "{name} works in TypeScript only");
+    assert!(
+        !has("test-runner", "Prohibited:"),
+        "test-runner only runs tools"
+    );
+    for name in [
+        "react-frontend-expert",
+        "typescript-mcp-expert",
+        "playwright-tester",
+    ] {
+        assert!(
+            !has(name, "**Python**") && !has(name, "**Go**") && !has(name, "SQLite"),
+            "{name} works in TypeScript only"
+        );
         assert!(has(name, "**TypeScript / JavaScript**"), "{name}");
     }
-    for name in ["code-debugger", "code-reviewer", "api-design-architect"] {
-        assert!(has(name, "**Rust**") && has(name, "**Python**"), "{name} works in every language");
+    for name in [
+        "code-debugger",
+        "code-reviewer",
+        "api-design-architect",
+        "build",
+    ] {
+        assert!(
+            has(name, "**Rust**") && has(name, "**Python**"),
+            "{name} works in every language"
+        );
     }
 }
 
@@ -256,14 +350,32 @@ fn rules_match_what_each_agent_can_do() {
 fn the_repository_rules_for_agents_exist_and_are_not_confused_with_the_templates() {
     let agents_md = std::fs::read_to_string(root().join("AGENTS.md")).unwrap();
     let top: String = agents_md.lines().take(8).collect::<Vec<_>>().join(" ");
-    assert!(top.contains("not an agent template"), "AGENTS.md must say it is not a template");
-    for rule in ["Git is read-only", "Never run `git commit`", "PATCH", "`2.1.17`", "Going to production", "Print the git commands"] {
-        assert!(agents_md.contains(rule) || agents_md.to_lowercase().contains(&rule.to_lowercase()), "AGENTS.md lacks: {rule}");
+    assert!(
+        top.contains("not an agent template"),
+        "AGENTS.md must say it is not a template"
+    );
+    for rule in [
+        "Git is read-only",
+        "Never run `git commit`",
+        "PATCH",
+        "`2.2.0`",
+        "Going to production",
+        "Print the git commands",
+    ] {
+        assert!(
+            agents_md.contains(rule) || agents_md.to_lowercase().contains(&rule.to_lowercase()),
+            "AGENTS.md lacks: {rule}"
+        );
     }
     let claude_md = std::fs::read_to_string(root().join("CLAUDE.md")).unwrap();
-    assert!(claude_md.lines().any(|line| line.trim() == "@AGENTS.md"), "CLAUDE.md must import AGENTS.md");
+    assert!(
+        claude_md.lines().any(|line| line.trim() == "@AGENTS.md"),
+        "CLAUDE.md must import AGENTS.md"
+    );
     for stray in ["AGENTS.md", "CLAUDE.md"] {
-        assert!(!root().join("agents").join(stray).exists(), "{stray} must not live in agents/");
+        assert!(
+            !root().join("agents").join(stray).exists(),
+            "{stray} must not live in agents/"
+        );
     }
 }
-

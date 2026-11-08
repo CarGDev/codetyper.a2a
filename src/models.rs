@@ -953,6 +953,7 @@ mod tests {
     #[test]
     fn roles_map_to_tiers() {
         assert_eq!(tier_for("architect"), Some(Tier::Deep));
+        assert_eq!(tier_for("build"), Some(Tier::Balanced));
         assert_eq!(tier_for("code-reviewer"), Some(Tier::OtherFamily));
         assert_eq!(tier_for("test-runner"), Some(Tier::Cheap));
         assert_eq!(tier_for("orchestrator"), Some(Tier::Balanced));
@@ -1107,7 +1108,7 @@ mod tests {
     fn every_template_carries_the_recommended_model_of_its_tier() {
         let t = templates();
         assert!(
-            t.len() >= 21,
+            t.len() >= 22,
             "expected all agent templates, saw {}",
             t.len()
         );

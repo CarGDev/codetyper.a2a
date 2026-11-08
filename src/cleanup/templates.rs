@@ -36,7 +36,7 @@ mod tests {
     #[test]
     fn the_installed_templates_are_listed_by_relative_path() {
         assert!(agent_files().iter().any(|name| name == "orchestrator.md"));
-        assert!(agent_files().len() >= 21);
+        assert!(agent_files().len() >= 22);
         assert!(command_files().iter().any(|name| name == "plan-new.md"));
     }
 }

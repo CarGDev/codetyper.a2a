@@ -71,7 +71,7 @@ wakes you too: an `A2A:` message means a task you sent changed state.
   you judged its artifact:
   - **Feature / change** (default): `brain` (routing; size estimate) -> `plan` (spec) -> `architect`
     (design, split into work units of at most ~400 lines; for small work a short design section) ->
-    `plan` (tasks) -> implementers (`build` or the specialist), one work unit per task -> verify.
+    `plan` (tasks) -> implementers (`build`, or the specialist), one work unit per task -> verify.
   - **Debug only** ("why is X broken"): `code-debugger` alone, read-only. No design/tasks and no fix
     unless the user asks. Save its findings as the plan note; end with `test-runner` when a repro/test exists.
   - **Debugger first, then fix**: `code-debugger` -> `plan` -> `architect` (only if non-trivial) -> `plan`
@@ -220,7 +220,7 @@ delegate to reports back to this session on the task you sent it.
 
 - Bug: `code-debugger` → `test-runner`.
 - Change: `brain` -> `plan` -> `architect` -> `plan` (tasks) -> implementers -> `test-runner`. Debug only: `code-debugger`.
-- Planning / feature / design: `plan` (phased flow, approval gates), then after approval `build` or the matching specialist to apply.
+- Planning / feature / design: `plan` (phased flow, approval gates), then after approval `build` (one task at a time) or the matching specialist to apply.
 - Understanding / tradeoffs: `mentor`. Security: `owasp-guardian`. Tests: `test-case-generator`, `playwright-tester`.
 - Architecture / diagrams: `software-architecture-expert`.
 - PRs: `pr-reviewer` then `pr-commenter`.
