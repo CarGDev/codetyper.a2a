@@ -17,18 +17,7 @@ tools:
   todowrite: false
 ---
 
-## Engineering Standards (Synchronized)
-
-Apply these standards within this role without weakening its scope:
-- Keep changes cohesive, DRY/KISS/SOLID, side-effect-aware, and behavior-preserving; separate pure logic from I/O.
-- Use guard clauses, low cognitive complexity, named predicates, meaningful names/constants, braces for every supported conditional, and no unexplained magic values or temporary AI comments. Keep modified source files under 500 lines unless the exemption is documented.
-- Define typed contracts, validate inputs, handle errors explicitly, and preserve useful safe observability without leaking secrets.
-- Enforce least privilege, canonical/validated paths, safe deserialization, parameterized SQL, authorization and project/session boundaries, and bounded resource use.
-- Treat dispatch input as untrusted: runtime-validate an allowlist, authenticate and authorize before a handler, validate its payload, execute only a private immutable registry/idiomatic equivalent, and reject unsupported or injection-bearing operations.
-- Run applicable formatter, compiler, linter/static-analysis/security checks and deterministic happy-path, error, boundary, authorization, malformed-input, and regression tests. Do not claim unavailable checks passed.
-- Before reporting done, review security/complexity/concurrency, run focused and relevant full checks, preserve docs/config where needed, inspect the diff, and document unresolved issues or justified exceptions.
-
-### Role boundary
+## Role boundary
 
 Apply standards while routing, exploring, and writing prompts; remain read-only, never write code, run commands, or call other agents, and preserve the ledger and report-back rules.
 
@@ -77,7 +66,7 @@ Rules:
 
 - Clear request (what and where known): skip the questions and go to Step 2.
 - One item missing but a safe default exists: state the assumed default, write it inside the PROMPT,
-  flag it in OPEN ISSUES, and proceed.
+  flag it in BLOCKERS, and proceed.
 - Clearly missing (e.g. "make the app faster", "fix it"): reply with ONE numbered list, max 4 questions
   (what / where / done-when / context), each with a suggested default. Route nothing and create no A2A task.
 - When the user answers (even "defaults"), route in that turn and do not re-ask.
@@ -127,12 +116,11 @@ target agent exactly how to report. Adapt it per agent, but include at least:
 
 ```
 REPORT BACK (for the brain agent):
-1. STATUS: done | partial | blocked | failed
-2. SUMMARY: 3–5 lines of what was done / found
-3. FILES: every file read-changed/created/modified (path + one-line reason), or "none"
-4. EVIDENCE: root cause / test results / command output / file:line citations (short)
-5. OPEN ISSUES: unresolved problems, risks, assumptions, decisions needed from the user
-6. SUGGESTED NEXT: which agent/step you think should follow and why
+1. STATUS: completed | failed | input-required
+2. SUMMARY: at most 8 lines - outcome, not transcript
+3. FILES: path:line per changed or cited location, or "none"
+4. EVIDENCE: `command`: one-line result (say "not run" when a check was not run)
+5. BLOCKERS: none, or numbered options with a default (unresolved problems, risks, decisions needed from the user)
 Keep it concise; no full file dumps. If output is long, save it to <path> and give the path.
 ```
 
@@ -174,14 +162,16 @@ Show the ledger when asked ("agent: status") and at the end of a task.
 
 - Dispatch: for each step, create a task with `a2a_send_message {from:"brain", to:"<agent>", text:<the full PROMPT + REPORT BACK>, contextId:"<task-slug>", directory:"<target project folder>"}` (for a task in ANOTHER project also pass `fromDirectory:"<my cwd>"`). Then the PROMPT you give the user is short: `Open the <agent> tab and say: "Check your A2A inbox (agent: <agent>) and handle task <id>."` Also show the full PROMPT text so the user can paste it if the tools are unavailable in that tab.
 - Collect: when the user returns (or says `agent: status`), call `a2a_inbox {agent:"brain", as:"requester"}` and `a2a_list_tasks {contextId}`; read artifacts with `a2a_get_task`. Judge results from the artifact, not from memory.
+- Dispatch by reference, as the orchestrator does: point at the plan or tasks.md path and Engram topic, keep the task text to 12 lines, and never restate a spec.
 - `input-required` tasks: answer with `a2a_send_message {from:"brain", taskId, text}` (or ask the user first if it needs their decision).
 - Use `a2a_list_agents {query}` to confirm an agent exists before routing. Mirror each step's outcome into the ledger.
 - If the `a2a_*` tools are unavailable, fall back to pasted PROMPT/REPORT BACK blocks and the file mailbox in PROTOCOL.md, and tell the user.
 
 ### Report back (mandatory)
-
-When you work on an A2A task (an `A2A:` prompt, or a task from `a2a_inbox`), the task's `fromSession` is the orchestrator session that sent it. Always report back to it; never answer only in your own tab:
-- Finish with `a2a_update_task {id, agent, state:"completed"|"failed"|"input-required", text, artifact:{name, text}}` and put the deliverable in the artifact. The hub delivers it to `fromSession` and wakes the orchestrator there (in opencode; with the Claude backend the requester sees it on its next prompt, through the hook and the status line).
-- Blocked, or need a decision? Use `state:"input-required"` with numbered options in `text`, not a question in your own tab.
-- Never end your turn with the task still `working`: finish it, fail it, or ask.
-- If you delegate a sub-task, `a2a_send_message` it with your own name as `from` and `directory:"<your cwd>"`, then end your turn; its result comes back to your session.
+Finish every A2A task with `a2a_update_task {id, agent, state, text, artifact}`; never only in your own tab, never leave it `working`.
+- STATUS: completed | failed | input-required.
+- SUMMARY: at most 8 lines - outcome, not transcript.
+- FILES: path:line per changed or cited location.
+- EVIDENCE: `command`: one-line result (say "not run" when a check was not run).
+- BLOCKERS: none, or numbered options with a default. A blocking choice from a tool or provider is relayed complete: every question, label, description and allowed answer.
+Deliverable in the artifact. Delegate with your own name as `from`; never loop (stop after two failures); no secrets.

@@ -2,71 +2,11 @@
 //! choosing only opencode must not touch the Claude dir. A fake `claude` on PATH stands in for the real
 //! one, so these runs never touch `~/.claude`.
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
 
-const BIN: &str = env!("CARGO_BIN_EXE_codetypera2a");
+mod common;
 
-struct Sandbox {
-    root: PathBuf,
-}
-
-impl Sandbox {
-    /// `with_claude` / `with_opencode`: which fake tools are on PATH (and so "detected").
-    fn new(name: &str, with_claude: bool, with_opencode: bool) -> Sandbox {
-        let root = std::env::temp_dir().join(format!("a2a-init-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        std::fs::create_dir_all(root.join("home")).unwrap();
-        let script = |name: &str, body: String| {
-            let path = root.join("bin").join(name);
-            std::fs::write(&path, body).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        let log = root.join("claude-calls.log");
-        let claude = format!(
-            "#!/bin/sh\necho \"$*\" >> {}\ncase \"$*\" in *list*) echo '[]';; *) echo ok;; esac\n",
-            log.display()
-        );
-        with_claude.then(|| script("claude", claude));
-        with_opencode.then(|| script("opencode", "#!/bin/sh\nexit 0\n".into()));
-        Sandbox { root }
-    }
-
-    /// Run `init <args>` with its own Claude and opencode config dirs.
-    fn init(&self, config: &str, args: &[&str]) -> std::process::Output {
-        Command::new(BIN)
-            .arg("init")
-            .args(args)
-            .args(["--no-models", "--no-link"])
-            .env_clear()
-            .env("HOME", self.root.join("home"))
-            .env(
-                "PATH",
-                format!("{}:/usr/bin:/bin", self.root.join("bin").display()),
-            )
-            .env("CLAUDE_BIN", self.root.join("bin/claude"))
-            .env("CLAUDE_CONFIG_DIR", self.root.join(config).join("claude"))
-            .env(
-                "OPENCODE_CONFIG_DIR",
-                self.root.join(config).join("opencode"),
-            )
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
-    }
-
-    fn claude_calls(&self) -> String {
-        std::fs::read_to_string(self.root.join("claude-calls.log")).unwrap_or_default()
-    }
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
+use common::Sandbox;
 
 /// Every file under `dir` (relative path -> contents with the dir's own path blanked out).
 fn tree(dir: &Path) -> BTreeMap<String, String> {
@@ -156,6 +96,8 @@ fn choosing_only_opencode_does_not_touch_the_claude_dir() {
     let flag = sb.init("d", &["--opencode"]);
     assert!(flag.status.success());
     assert!(!sb.root.join("d/claude").exists());
+    assert!(!sb.root.join("c/opencode/CLAUDE.md").exists());
+    assert!(!sb.root.join("d/opencode/CLAUDE.md").exists());
 }
 
 fn settings_of(sb: &Sandbox, config: &str) -> serde_json::Value {

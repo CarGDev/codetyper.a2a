@@ -219,11 +219,12 @@ impl ClaudeBackend {
         let _ = std::fs::create_dir_all(runs).and_then(|_| std::fs::write(runs.join(format!("{session}.json")), meta.to_string()));
     }
 
-    /// The pid of the run in progress, if its process is alive; a dead one's file is removed.
+    /// The pid of the run in progress: alive and leading its own process group, as a run is spawned. Any
+    /// other pid file (dead, reserved, garbage, a reused pid) is removed.
     fn running_pid(&self, session: &str) -> Option<u32> {
         let file = self.pid_file(session);
-        let pid = std::fs::read_to_string(&file).ok().and_then(|t| t.trim().parse::<u32>().ok())?;
-        if sys::pid_alive(pid) {
+        let pid = std::fs::read_to_string(&file).ok().and_then(|t| t.trim().parse::<u32>().ok());
+        if let Some(pid) = pid.filter(|p| sys::is_signalable_pid(*p) && sys::pid_alive(*p) && sys::leads_own_group(*p)) {
             return Some(pid);
         }
         let _ = std::fs::remove_file(&file);
@@ -440,5 +441,56 @@ mod tests {
         assert_eq!(settle(Some(0), bad, ""), Settled { failure: Some("Credit balance is too low".into()), started: true });
         assert_eq!(settle(Some(0), "plain text", ""), Settled { failure: None, started: true }, "a clean exit is a success");
         assert_eq!(settle(None, "", ""), Settled { failure: None, started: false }, "killed by a signal (oc cancel): not a failure");
+    }
+
+    fn backend_in(name: &str) -> ClaudeBackend {
+        let runs = std::env::temp_dir().join(format!("a2a-runs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&runs);
+        std::fs::create_dir_all(&runs).unwrap();
+        ClaudeBackend { runs, bin: "claude".into(), failures: Arc::default(), auth: std::sync::OnceLock::new() }
+    }
+
+    #[test]
+    fn a_run_file_with_a_reserved_pid_is_not_a_run() {
+        let backend = backend_in("reserved");
+        for (n, content) in ["0", "1", "2147483648", "4294967295", "-5", "abc", ""].iter().enumerate() {
+            let session = format!("s{n}");
+            std::fs::write(backend.pid_file(&session), content).unwrap();
+            assert_eq!(backend.running_pid(&session), None, "{content:?}");
+            assert!(!backend.pid_file(&session).exists(), "{content:?} stays behind");
+        }
+        let _ = std::fs::remove_dir_all(&backend.runs);
+    }
+
+    #[test]
+    fn a_run_file_naming_a_process_outside_its_own_group_never_signals_a_group() {
+        let backend = backend_in("group");
+        let mut bystander = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::write(backend.pid_file("s"), bystander.id().to_string()).unwrap();
+        let interrupted = backend.interrupt("s");
+        let alive = bystander.try_wait().unwrap().is_none();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        assert!(interrupted.is_err(), "no run is in progress");
+        assert!(alive, "the bystander was signalled");
+        let _ = std::fs::remove_dir_all(&backend.runs);
+    }
+
+    #[test]
+    fn a_run_that_leads_its_own_group_is_found_and_interrupted() {
+        use std::os::unix::process::CommandExt;
+        let backend = backend_in("leader");
+        let mut run = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        std::fs::write(backend.pid_file("s"), run.id().to_string()).unwrap();
+        assert_eq!(backend.running_pid("s"), Some(run.id()));
+        assert!(backend.interrupt("s").is_ok());
+        let stopped = (0..250).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            run.try_wait().unwrap().is_some()
+        });
+        let _ = run.kill();
+        let _ = run.wait();
+        assert!(stopped, "the run's group was not interrupted");
+        let _ = std::fs::remove_dir_all(&backend.runs);
     }
 }

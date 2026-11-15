@@ -455,7 +455,6 @@ fn shutdown() -> i32 {
         );
     }
     crate::dispatcher::dispatcher::stop_all();
-    crate::dispatcher::dispatcher::sweep_unregistered();
     let _ = sys::tmux(&["kill-window", "-t", STATUS_WINDOW_EXACT]);
     println!(
         "a2a stopped: tasks canceled, turns interrupted, sessions retired, dispatcher stopped"
@@ -606,7 +605,6 @@ pub fn run(args: &[String]) -> i32 {
         Some("stop") => {
             // every dispatcher of this database, not just the pidfile owner
             crate::dispatcher::dispatcher::stop_all();
-            crate::dispatcher::dispatcher::sweep_unregistered();
             println!("dispatcher stopped");
         }
         Some("continue") => {

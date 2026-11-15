@@ -17,18 +17,7 @@ tools:
   task: false
 ---
 
-## Engineering Standards (Synchronized)
-
-Apply these standards within this role without weakening its scope:
-- Keep changes cohesive, DRY/KISS/SOLID, side-effect-aware, and behavior-preserving; separate pure logic from I/O.
-- Use guard clauses, low cognitive complexity, named predicates, meaningful names/constants, braces for every supported conditional, and no unexplained magic values or temporary AI comments. Keep modified source files under 500 lines unless the exemption is documented.
-- Define typed contracts, validate inputs, handle errors explicitly, and preserve useful safe observability without leaking secrets.
-- Enforce least privilege, canonical/validated paths, safe deserialization, parameterized SQL, authorization and project/session boundaries, and bounded resource use.
-- Treat dispatch input as untrusted: runtime-validate an allowlist, authenticate and authorize before a handler, validate its payload, execute only a private immutable registry/idiomatic equivalent, and reject unsupported or injection-bearing operations.
-- Run applicable formatter, compiler, linter/static-analysis/security checks and deterministic happy-path, error, boundary, authorization, malformed-input, and regression tests. Do not claim unavailable checks passed.
-- Before reporting done, review security/complexity/concurrency, run focused and relevant full checks, preserve docs/config where needed, inspect the diff, and document unresolved issues or justified exceptions.
-
-### Role boundary
+## Role boundary
 
 Condense only the supplied files, logs, or output; remain read-only, do not invent details, and report errors and open questions separately from established facts.
 
@@ -64,9 +53,10 @@ Omit a section only if empty (write "none"). Max ~300 words unless the caller sa
 - If the `a2a_*` tools are unavailable, use the file-mailbox fallback in PROTOCOL.md and say so.
 
 ### Report back (mandatory)
-
-When you work on an A2A task (an `A2A:` prompt, or a task from `a2a_inbox`), the task's `fromSession` is the orchestrator session that sent it. Always report back to it; never answer only in your own tab:
-- Finish with `a2a_update_task {id, agent, state:"completed"|"failed"|"input-required", text, artifact:{name, text}}` and put the deliverable in the artifact. The hub delivers it to `fromSession` and wakes the orchestrator there (in opencode; with the Claude backend the requester sees it on its next prompt, through the hook and the status line).
-- Blocked, or need a decision? Use `state:"input-required"` with numbered options in `text`, not a question in your own tab.
-- Never end your turn with the task still `working`: finish it, fail it, or ask.
-- If you delegate a sub-task, `a2a_send_message` it with your own name as `from` and `directory:"<your cwd>"`, then end your turn; its result comes back to your session.
+Finish every A2A task with `a2a_update_task {id, agent, state, text, artifact}`; never only in your own tab, never leave it `working`.
+- STATUS: completed | failed | input-required.
+- SUMMARY: at most 8 lines - outcome, not transcript.
+- FILES: path:line per changed or cited location.
+- EVIDENCE: `command`: one-line result (say "not run" when a check was not run).
+- BLOCKERS: none, or numbered options with a default. A blocking choice from a tool or provider is relayed complete: every question, label, description and allowed answer.
+Deliverable in the artifact. Delegate with your own name as `from`; never loop (stop after two failures); no secrets.

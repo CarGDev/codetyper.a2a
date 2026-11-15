@@ -1,6 +1,6 @@
 //! The dispatcher with `DISPATCH_BACKEND=claude`: a fake `claude` script stands in for the real one
 //! (its model calls cannot run in CI), records its arguments and answers through the hub like an agent.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -91,7 +91,8 @@ impl Env {
     /// The dispatcher started with an `ANTHROPIC_API_KEY` in its environment and the given auth mode.
     fn dispatcher_with_key(&self, auth: &str) -> Proc {
         let mut cmd = self.cmd("dispatcher");
-        cmd.env("ANTHROPIC_API_KEY", "test-key-not-real").env("A2A_CLAUDE_AUTH", auth);
+        cmd.env("ANTHROPIC_API_KEY", "test-key-not-real")
+            .env("A2A_CLAUDE_AUTH", auth);
         Proc(cmd.spawn().unwrap())
     }
 
@@ -216,6 +217,12 @@ fn a_task_wakes_the_agent_once_resumes_its_session_and_completes() {
     assert!(
         line.starts_with("-p A2A: you are agent \"mentor\"") && line.contains("mcp__a2a__inbox"),
         "{line}"
+    );
+    assert!(
+        line.contains(
+            "STATUS, SUMMARY (<=8 lines), FILES (path:line), EVIDENCE (command: result), BLOCKERS"
+        ),
+        "the assignee prompt names the compact report fields: {line}"
     );
     assert!(
         line.contains("--output-format stream-json --verbose --agent mentor --session-id "),
@@ -439,9 +446,10 @@ fn marker_attribution_ignores_spoofed_arguments_and_fake_session() {
     ));
     assert!(metadata[0].contains("safe-default"), "{}", metadata[0]);
     assert!(metadata[0].contains("\"backend\":\"opencode\""));
-    assert!(env
-        .rows("SELECT session_id FROM sessions WHERE session_id = 'fake-unregistered'")
-        .is_empty());
+    assert!(
+        env.rows("SELECT session_id FROM sessions WHERE session_id = 'fake-unregistered'")
+            .is_empty()
+    );
     let _ = std::fs::remove_dir_all(&env.dir);
 }
 
@@ -522,6 +530,10 @@ fn the_api_key_is_withheld_from_headless_turns_unless_api_mode_asks_for_it() {
         wait_for("the fake agent completes the task", || {
             env.state(&task) == vec!["completed"]
         });
-        assert_eq!(env.keys_seen_by_claude(), vec![expected.to_string()], "A2A_CLAUDE_AUTH={auth}");
+        assert_eq!(
+            env.keys_seen_by_claude(),
+            vec![expected.to_string()],
+            "A2A_CLAUDE_AUTH={auth}"
+        );
     }
 }

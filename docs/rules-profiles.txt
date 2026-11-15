@@ -15,7 +15,7 @@ profile secure-dispatch: dispatch-registry dispatch-all-intro dispatch-core disp
 
 # Roles.
 profile writer: preamble @style 5 6 10 11 13 14 15 16 @secure-dispatch
-profile reviewer: preamble @style 5 6 10 11 13 14 15 16 @secure-dispatch
+profile reviewer-readonly: preamble @style 10 11 13 14 16 dispatch-injection dispatch-tests dispatch-static dispatch-done
 profile debugger: preamble @style 10 11 13 14 @secure-dispatch
 profile guardian: preamble @style 10 11 13 14 @secure-dispatch
 profile test-writer: preamble 3 4 5 7 8 9 14 dispatch-tests
@@ -30,8 +30,8 @@ profile none:
 agent api-design-architect: writer lang-all
 agent build: writer lang-all
 agent code-debugger: debugger lang-all
-agent code-reviewer: reviewer lang-all
-agent pr-reviewer: reviewer lang-all
+agent code-reviewer: reviewer-readonly lang-dispatch-all
+agent pr-reviewer: reviewer-readonly lang-dispatch-all
 agent owasp-guardian: guardian lang-all
 agent react-frontend-expert: writer lang-ts
 agent typescript-mcp-expert: writer lang-ts

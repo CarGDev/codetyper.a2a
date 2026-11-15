@@ -107,7 +107,7 @@ provider-specific models. Each agent needs `"a2a_*": true` under `tools:`, an `#
 the agent's name, and the **Report back (mandatory)** block (finish with `a2a_update_task`; the hub
 returns the result to the session the task came from). Copy a small existing agent such as
 `summarizer.md` as the starting point. Every template needs a `model:` line (`github-copilot/<id>`): the first choice of its role in
-`tier_for()` in `src/models.rs` (cheap, balanced, deep or other-family), and the same id in
+`tier_for()` in `src/models/tiers.rs` (cheap or balanced; deep is an opt-in by the user, never a default), and the same id in
 `model-policy.json` `agentDefaults`; a test fails if they drift apart or the policy would not allow it.
 Keep agents **least-privilege**: sessions run with the user's
 opencode permissions and no sandbox, so give each agent only the `tools:` it needs (read-only agents

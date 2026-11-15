@@ -1,9 +1,10 @@
 //! Carrying out one cleanup action. Every failure is a one-line message; the caller goes on.
 use super::jsonc;
 use super::plan::{self, Action, JsonKind};
+use super::procs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const STOP_WAIT: Duration = Duration::from_secs(3);
 const POLL: Duration = Duration::from_millis(100);
@@ -19,24 +20,37 @@ fn quiet(program: &str, args: &[&str]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// The command line of `pid` right now, to make sure the number still belongs to one of our dispatchers.
-fn command_of(pid: u32) -> String {
-    Command::new("ps")
-        .args(["-o", "command=", "-p", &pid.to_string()])
+/// How long `pid` has been running and its command line right now; `None` when it is gone.
+fn live_process(pid: u32) -> Option<(Duration, String)> {
+    let output = Command::new("ps")
+        .args(["-o", "etime=,command=", "-p", &pid.to_string()])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let (etime, command) = text.trim().split_once(char::is_whitespace)?;
+    Some((procs::parse_etime(etime)?, command.trim().to_string()))
 }
 
-fn stop(pid: u32) -> Result<String, String> {
-    let current = command_of(pid);
-    if current.is_empty() {
-        return Ok(format!("process {pid} already gone"));
+/// Whether `pid` is still the dispatcher the claim was written for. `Ok(false)` means it is gone.
+fn confirm_ours(pid: u32, claimed_at: SystemTime) -> Result<bool, String> {
+    let sampled_at = SystemTime::now();
+    let Some((elapsed, command)) = live_process(pid) else {
+        return Ok(false);
+    };
+    if procs::still_ours(&command, elapsed, sampled_at, claimed_at) {
+        return Ok(true);
     }
-    if !super::is_ours(&current) {
-        return Err(format!(
-            "process {pid} is no longer one of ours; left alone"
-        ));
+    Err(format!(
+        "process {pid} is no longer one of ours; left alone"
+    ))
+}
+
+fn stop(pid: u32, claimed_at: SystemTime) -> Result<String, String> {
+    if !crate::sys::is_signalable_pid(pid) {
+        return Err(format!("refusing to signal pid {pid}"));
+    }
+    if !confirm_ours(pid, claimed_at)? {
+        return Ok(format!("process {pid} already gone"));
     }
     let id = pid.to_string();
     quiet("kill", &[&id]);
@@ -44,13 +58,24 @@ fn stop(pid: u32) -> Result<String, String> {
     while crate::sys::pid_alive(pid) && started.elapsed() < STOP_WAIT {
         std::thread::sleep(POLL);
     }
-    if crate::sys::pid_alive(pid) {
+    if crate::sys::pid_alive(pid) && confirm_ours(pid, claimed_at)? {
         quiet("kill", &["-9", &id]);
     }
     if crate::sys::pid_alive(pid) {
         return Err(format!("process {pid} would not stop"));
     }
     Ok(format!("stopped {pid}"))
+}
+
+/// Removes `path` only if it is an empty directory; a folder that still holds something is left alone.
+fn remove_dir_if_empty(path: &Path) -> Result<String, String> {
+    match std::fs::remove_dir(path) {
+        Ok(()) => Ok(format!("deleted {}", path.display())),
+        Err(_) => Ok(format!(
+            "kept {} (not empty or already gone)",
+            path.display()
+        )),
+    }
 }
 
 fn remove(path: &Path) -> Result<String, String> {
@@ -136,7 +161,10 @@ fn edit_rc(path: &Path) -> Result<String, String> {
 
 pub fn run(action: &Action) -> Result<String, String> {
     match action {
-        Action::Stop { pid, .. } => stop(*pid),
+        Action::Stop {
+            pid, claimed_at, ..
+        } => stop(*pid, *claimed_at),
+        Action::Note(text) => Ok(text.clone()),
         Action::ClaudePlugin => {
             quiet(
                 "claude",
@@ -159,6 +187,7 @@ pub fn run(action: &Action) -> Result<String, String> {
             Ok("tmux window closed (if it was open)".into())
         }
         Action::Remove(path) => remove(path),
+        Action::RemoveDirIfEmpty(path) => remove_dir_if_empty(path),
         Action::EditJson(path, kind) => edit_json(path, *kind),
         Action::EditRc(path) => edit_rc(path),
         Action::CargoUninstall => Ok(match quiet("cargo", &["uninstall", "codetypera2a"]) {
@@ -181,6 +210,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_hand_built_stop_for_a_reserved_pid_is_refused() {
+        for pid in [0, 1, i32::MAX as u32 + 1, u32::MAX] {
+            let refused = stop(pid, SystemTime::now());
+            assert!(
+                refused.is_err(),
+                "pid {pid} must never be signalled: {refused:?}"
+            );
+        }
     }
 
     #[test]

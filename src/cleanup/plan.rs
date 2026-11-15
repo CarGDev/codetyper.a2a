@@ -1,5 +1,7 @@
 //! What `uninstall` removes, decided from a snapshot of the machine and with no side effects.
+use super::procs::Scoped;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub const RC_START: &str = "# >>> a2a (codetypera2a) >>>";
 pub const RC_END: &str = "# <<< a2a (codetypera2a) <<<";
@@ -13,10 +15,18 @@ pub enum JsonKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Action {
-    Stop { pid: u32, command: String },
+    Stop {
+        pid: u32,
+        command: String,
+        claimed_at: SystemTime,
+    },
+    /// A report line (other homes' dispatchers, stale pid files); nothing to carry out.
+    Note(String),
     ClaudePlugin,
     TmuxWindow,
     Remove(PathBuf),
+    /// Removes a directory only when it is empty (a skill folder after its file went).
+    RemoveDirIfEmpty(PathBuf),
     EditJson(PathBuf, JsonKind),
     EditRc(PathBuf),
     CargoUninstall,
@@ -31,7 +41,9 @@ pub struct Env {
     pub opencode_dir: PathBuf,
     pub runtime_homes: Vec<PathBuf>,
     pub temp_dir: PathBuf,
-    pub processes: Vec<(u32, String)>,
+    pub dispatchers: Scoped,
+    /// Guarded files (CLAUDE.md) that are still exactly what `init` wrote: the only ones uninstall removes.
+    pub guarded_ours: Vec<PathBuf>,
     pub exe: Option<PathBuf>,
     pub keep_binary: bool,
     /// Template files `init` installs (relative paths): the only agents and commands that are removed.
@@ -136,20 +148,55 @@ fn installed_templates(env: &Env, exists: &dyn Fn(&Path) -> bool) -> Vec<Action>
     out
 }
 
+/// The folders of the skill files being removed: each goes away too once it is empty.
+fn skill_dirs(files: &[PathBuf]) -> impl Iterator<Item = PathBuf> + '_ {
+    files
+        .iter()
+        .filter(|file| file.file_name().is_some_and(|name| name == "SKILL.md"))
+        .filter_map(|file| file.parent().map(Path::to_path_buf))
+}
+
+/// Report lines for dispatchers that are not ours to stop. Counts only: another home's command line may
+/// carry paths that belong to someone else.
+fn dispatcher_notes(dispatchers: &Scoped) -> Vec<Action> {
+    let foreign = (dispatchers.foreign > 0).then(|| {
+        format!(
+            "{} dispatcher(s) of other homes left running (not ours to stop)",
+            dispatchers.foreign
+        )
+    });
+    let stale = dispatchers.stale.iter().map(|claim| {
+        let who = claim.pid.map_or_else(
+            || {
+                let name = claim.file.file_name().unwrap_or_default();
+                format!("file {}", name.to_string_lossy())
+            },
+            |pid| format!("pid {pid}"),
+        );
+        format!("stale dispatcher claim, {who}: {}", claim.reason.text())
+    });
+    foreign.into_iter().chain(stale).map(Action::Note).collect()
+}
+
 pub fn build(env: &Env, probe: &Probe) -> Vec<Action> {
     let list = probe.list;
     let mut plan: Vec<Action> = env
-        .processes
+        .dispatchers
+        .ours
         .iter()
-        .map(|(pid, command)| Action::Stop {
-            pid: *pid,
-            command: command.clone(),
+        .map(|(proc, claimed_at)| Action::Stop {
+            pid: proc.pid,
+            command: proc.command.clone(),
+            claimed_at: *claimed_at,
         })
         .collect();
+    plan.extend(dispatcher_notes(&env.dispatchers));
     plan.push(Action::ClaudePlugin);
     plan.push(Action::TmuxWindow);
     plan.extend(installed_templates(env, probe.exists));
     plan.push(Action::Remove(env.claude_root.join("a2a-marketplace")));
+    plan.extend(env.guarded_ours.iter().cloned().map(Action::Remove));
+    plan.extend(skill_dirs(&env.guarded_ours).map(Action::RemoveDirIfEmpty));
     plan.push(Action::Remove(env.claude_root.join(".a2a-manifest.json")));
     plan.push(Action::Remove(env.opencode_dir.join("plugins").join("a2a")));
     plan.extend(
@@ -190,10 +237,12 @@ pub fn build(env: &Env, probe: &Probe) -> Vec<Action> {
 
 pub fn describe(action: &Action) -> String {
     match action {
-        Action::Stop { pid, command } => format!("stop process {pid} ({command})"),
+        Action::Stop { pid, command, .. } => format!("stop process {pid} ({command})"),
+        Action::Note(text) => text.clone(),
         Action::ClaudePlugin => "claude plugin uninstall a2a-pane + marketplace remove".into(),
         Action::TmuxWindow => "close the a2a-status tmux window".into(),
         Action::Remove(p) => format!("delete {}", p.display()),
+        Action::RemoveDirIfEmpty(p) => format!("delete {} if empty", p.display()),
         Action::EditJson(p, _) => format!("remove our entries from {}", p.display()),
         Action::EditRc(p) => format!("remove the a2a block from {}", p.display()),
         Action::CargoUninstall => "cargo uninstall codetypera2a".into(),
@@ -217,166 +266,4 @@ pub fn without_rc_block(text: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn env(keep_binary: bool) -> Env {
-        Env {
-            home: "/h".into(),
-            claude_root: "/h/.claude".into(),
-            claude_json: "/h/.claude.json".into(),
-            opencode_dir: "/h/.config/opencode".into(),
-            runtime_homes: vec!["/h/.codetypera2a".into()],
-            temp_dir: "/t".into(),
-            processes: vec![(7, "/h/.cargo/bin/oc dispatch".into())],
-            exe: Some("/h/.cargo/bin/codetypera2a".into()),
-            keep_binary,
-            agent_files: vec!["brain.md".into(), "mentor.md".into()],
-            command_files: vec!["plan-new.md".into()],
-        }
-    }
-
-    fn fake(dir: &Path) -> Vec<PathBuf> {
-        let names: &[&str] = match dir.to_str().unwrap() {
-            "/h/.claude/agents" => &["mine.md", "brain.md"],
-            "/h/.config/opencode/commands" => &["plan-new.md"],
-            "/h/.config/opencode" => &[
-                "opencode.jsonc",
-                "opencode.jsonc.bak-a2a",
-                "opencode.jsonc.bak-a2a-models",
-            ],
-            "/t" => &["a2a-window-a2a-status.lock", "other"],
-            _ => &[],
-        };
-        names.iter().map(|n| dir.join(n)).collect()
-    }
-
-    fn probe() -> Probe<'static> {
-        Probe {
-            list: &fake,
-            exists: &|p| {
-                [
-                    "/h/.claude/agents/mine.md",
-                    "/h/.claude/agents/brain.md",
-                    "/h/.claude/agents/brain.md.bak-a2a",
-                    "/h/.config/opencode/commands/plan-new.md",
-                ]
-                .contains(&p.to_str().unwrap())
-            },
-            links_to_exe: &|p| p == Path::new("/h/.cargo/bin/oc"),
-        }
-    }
-
-    #[test]
-    fn a_folder_that_is_not_ours_is_never_deleted_and_a_foreign_oc_is_kept() {
-        let mut stray = env(false);
-        stray.runtime_homes = vec!["/h".into(), "/h/projects".into(), "/h/.codetypera2a".into()];
-        let none = |_: &Path| false;
-        let foreign = Probe {
-            list: &fake,
-            exists: &none,
-            links_to_exe: &none,
-        };
-        let plan = build(&stray, &foreign);
-        assert!(
-            !plan.contains(&Action::Remove("/h".into()))
-                && !plan.contains(&Action::Remove("/h/projects".into()))
-        );
-        assert!(plan.contains(&Action::Remove("/h/.codetypera2a".into())));
-        assert!(
-            !plan.contains(&Action::Remove("/h/.cargo/bin/oc".into())),
-            "oc is not a link to us"
-        );
-        let marked = |p: &Path| p == Path::new("/h/work/hub.db");
-        assert!(
-            !looks_like_our_home(Path::new("/h/projects/a2a"), &none),
-            "a project folder named a2a"
-        );
-        assert!(looks_like_our_home(
-            Path::new("/h/.codetypera2a"),
-            &none
-        ));
-        assert!(looks_like_our_home(Path::new("/h/work"), &marked));
-        assert!(!looks_like_our_home(Path::new("/h/work"), &none));
-        let mut by_hand = env(false);
-        by_hand.exe = Some("/usr/local/bin/codetypera2a".into());
-        assert!(
-            !build(&by_hand, &probe())
-                .iter()
-                .any(|a| matches!(a, Action::Remove(p) if p.starts_with("/usr/local")))
-        );
-    }
-
-    #[test]
-    fn the_plan_removes_everything_ours_and_the_binary() {
-        let plan = build(&env(false), &probe());
-        let has = |a: Action| plan.contains(&a);
-        assert!(has(Action::Stop {
-            pid: 7,
-            command: "/h/.cargo/bin/oc dispatch".into()
-        }));
-        assert!(
-            has(Action::Remove("/h/.claude/agents/brain.md".into()))
-                && has(Action::Remove("/h/.claude/agents/brain.md.bak-a2a".into())),
-            "an installed template and its backup copy"
-        );
-        assert!(
-            !has(Action::Remove("/h/.claude/agents/mine.md".into())),
-            "an agent the user wrote is never removed"
-        );
-        assert!(has(Action::Remove(
-            "/h/.config/opencode/commands/plan-new.md".into()
-        )));
-        assert!(has(Action::Remove(
-            "/h/.config/opencode/opencode.jsonc.bak-a2a-models".into()
-        )));
-        assert!(
-            !has(Action::Remove("/h/.config/opencode/opencode.jsonc".into())),
-            "the config itself stays"
-        );
-        assert!(
-            has(Action::Remove("/t/a2a-window-a2a-status.lock".into()))
-                && !has(Action::Remove("/t/other".into()))
-        );
-        assert!(
-            has(Action::Remove("/h/.codetypera2a".into()))
-                && has(Action::Remove("/h/.codetypera2a".into()))
-        );
-        assert!(has(Action::EditRc("/h/.zshrc".into())) && has(Action::CargoUninstall));
-        assert!(
-            has(Action::Remove("/h/.cargo/bin/codetypera2a".into()))
-                && has(Action::Remove("/h/.cargo/bin/oc".into()))
-        );
-    }
-
-    #[test]
-    fn keeping_the_binary_leaves_it_alone() {
-        let plan = build(&env(true), &probe());
-        assert!(!plan.contains(&Action::CargoUninstall));
-        assert!(!plan.contains(&Action::Remove("/h/.cargo/bin/codetypera2a".into())));
-    }
-
-    #[test]
-    fn the_shell_block_is_cut_out_and_nothing_else() {
-        let text = "export A=1\n\n# >>> a2a (codetypera2a) >>>\nalias opencode='oc'\n# <<< a2a (codetypera2a) <<<\nexport B=2\n";
-        assert_eq!(without_rc_block(text).unwrap(), "export A=1\nexport B=2\n");
-        assert_eq!(without_rc_block("export A=1\n"), None);
-        let only = "# >>> a2a (codetypera2a) >>>\nx\n# <<< a2a (codetypera2a) <<<\n";
-        assert_eq!(without_rc_block(only).unwrap(), "");
-    }
-
-    #[test]
-    fn the_owner_is_read_from_the_install_path() {
-        assert_eq!(
-            owner(Path::new(
-                "/opt/homebrew/Cellar/codetypera2a/2/bin/codetypera2a"
-            )),
-            Some(Action::BrewUninstall)
-        );
-        assert_eq!(
-            owner(Path::new("/h/.cargo/bin/codetypera2a")),
-            Some(Action::CargoUninstall)
-        );
-        assert_eq!(owner(Path::new("/usr/local/bin/codetypera2a")), None);
-    }
-}
+mod tests;

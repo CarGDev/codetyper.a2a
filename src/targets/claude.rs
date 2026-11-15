@@ -1,8 +1,8 @@
 //! The Claude Code target: the agents and commands `init` embeds, converted to Claude Code's format
 //! (see `convert`), and the MCP servers in the user-scope config. Nothing here touches opencode.
 use super::convert;
-use crate::cli::{default_mcp_servers, install, which, AGENTS, CLAUDE_MOD, COMMANDS};
-use serde_json::{json, Value};
+use crate::cli::{AGENTS, CLAUDE_MOD, COMMANDS, default_mcp_servers, install, which};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// Where Claude Code keeps its files: the config dir (agents, commands) and the JSON that holds the
@@ -180,7 +180,7 @@ pub fn register_mcp(file: &Path, exe: &Path, force: bool) -> Result<String, Stri
 }
 
 /// FNV-1a 64: a small stable content hash (it only has to tell "unchanged" from "edited").
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     let h = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
         (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3)
     });
@@ -206,6 +206,14 @@ impl Manifest {
         Manifest {
             files: files.unwrap_or_default(),
         }
+    }
+
+    pub(crate) fn recorded(&self, rel: &str) -> Option<&str> {
+        self.files.get(rel).map(String::as_str)
+    }
+
+    pub(crate) fn record(&mut self, rel: &str, hash: String) {
+        self.files.insert(rel.to_string(), hash);
     }
 
     pub fn save(&self, root: &Path) -> Result<(), String> {
@@ -287,6 +295,7 @@ fn sync_all(
 /// Convert and write every embedded agent and command.
 fn install_markdown(root: &Path, manifest: &mut Manifest, force: bool) -> Result<Synced, String> {
     let mut items: Vec<(String, Vec<u8>)> = Vec::new();
+    let deep = crate::models::deep_effective();
     for file in AGENTS.files() {
         let name = file
             .path()
@@ -298,9 +307,13 @@ fn install_markdown(root: &Path, manifest: &mut Manifest, force: bool) -> Result
             .ok_or_else(|| format!("{name}: not UTF-8"))?;
         items.push((
             format!("agents/{name}.md"),
-            convert::agent(name, text)
-                .map_err(|e| format!("{name}: {e}"))?
-                .into_bytes(),
+            convert::agent(
+                name,
+                text,
+                crate::models::effective_tier(name, &deep).map(crate::models::claude_alias),
+            )
+            .map_err(|e| format!("{name}: {e}"))?
+            .into_bytes(),
         ));
     }
     for file in COMMANDS.files() {
@@ -536,6 +549,7 @@ pub fn run(dirs: &Dirs, exe: &Path, opts: &Opts, claude: Runner) -> Result<Vec<S
     let mut manifest = Manifest::load(&dirs.root);
     let md = install_markdown(&dirs.root, &mut manifest, opts.force)?;
     let mut lines = vec![sync_line("agents and commands", &md, &dirs.root)];
+    lines.extend(super::guarded::sync_all(&dirs.root, &mut manifest, opts.force));
     let mut kept = md.kept;
     if opts.md_only {
         manifest.save(&dirs.root)?;
@@ -1002,9 +1016,11 @@ mod tests {
         let dir = tmp("broken");
         let file = dir.join(".claude.json");
         std::fs::write(&file, "{ not json").unwrap();
-        assert!(register_mcp(&file, Path::new("/x/a"), false)
-            .unwrap_err()
-            .contains("left untouched"));
+        assert!(
+            register_mcp(&file, Path::new("/x/a"), false)
+                .unwrap_err()
+                .contains("left untouched")
+        );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1063,7 +1079,7 @@ mod tests {
         );
         let fifth = run(&dirs, Path::new("/x/codetypera2a"), &opts, &no_claude).unwrap();
         assert!(
-            fifth[0].contains("0 written") && fifth[1].contains("0 written"),
+            fifth[0].contains("0 written") && fifth[3].contains("0 written"),
             "an up-to-date install writes 0 files: {fifth:?}"
         );
         run(
@@ -1102,7 +1118,7 @@ mod tests {
             &no_claude,
         )
         .unwrap();
-        assert!(lines[1].contains("--md-only"), "{lines:?}");
+        assert!(lines[3].contains("--md-only"), "{lines:?}");
         assert!(!dirs.mcp_file.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

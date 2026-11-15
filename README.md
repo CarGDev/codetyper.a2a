@@ -13,7 +13,7 @@
 
 <p>
 <a href="https://github.com/CarGDev/codetyper.a2a/releases"><img src="https://img.shields.io/github/v/release/CarGDev/codetyper.a2a?style=for-the-badge&label=release" alt="Latest release"></a>
-<img src="https://img.shields.io/badge/version-2.2.0-2ac3de?style=for-the-badge" alt="Version 2.2.0">
+<img src="https://img.shields.io/badge/version-2.2.1-2ac3de?style=for-the-badge" alt="Version 2.2.1">
 <img src="https://img.shields.io/badge/Rust-1.85%2B-f74c00?style=for-the-badge&logo=rust&logoColor=white" alt="Rust 1.85+">
 <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux-7aa2f7?style=for-the-badge" alt="Platform">
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=for-the-badge" alt="License: Apache 2.0"></a>
@@ -73,7 +73,7 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 | `oc status`            | dispatcher state, running sessions, open tasks                      |
 | `oc watch`             | live view of the dispatcher log (what the tmux window shows)        |
 | `oc dispatch`          | run the dispatcher in this pane (foreground)                        |
-| `oc stop`              | stop every dispatcher of this database (after an upgrade `oc` then starts the current one) |
+| `oc stop`              | stop this home's registered dispatchers and the pid-file owner (after an upgrade `oc` then starts the current one) |
 | `oc continue <ctx>`    | allow more hops for a context that hit the hop cap                  |
 | `oc trace <task>`      | timeline of one task (id or 8-character prefix): sender, claim, delivery, state changes, duration |
 | `oc shutdown`          | end everything: cancel open tasks, interrupt running turns, retire sessions, stop the dispatcher (runs automatically when the last opencode exits, unless a Claude Code turn or an open task on a Claude agent is still live, in which case the dispatcher and the `a2a-status` window stay up; `A2A_KEEP_RUNNING=1` disables, `--force` ends everything) |
@@ -88,7 +88,7 @@ agent finishes, the orchestrator's tab is woken with the result. Switch tabs wit
 | `oc agent <name>`      | switch this folder's newest session to another agent                |
 | `oc open-project <dir>` | open another project in its own tmux tab (`--prompt <text>` sends it to that orchestrator) |
 | `oc ensure`            | start the dispatcher and the status tab without starting opencode   |
-| `codetypera2a models`  | choose each agent's model (`--show`, `--recommended`)               |
+| `codetypera2a models`  | choose each agent's model (`--show`, `--recommended`; `models deep add\|remove\|list` opts agents in to the strongest model) |
 | `codetypera2a init --md-only` | refresh only the agent/command markdown (alias `codetypera2a update`) |
 | `codetypera2a eval`    | replay the deterministic scenarios (routing, hop cap, no duplicate nudges, seeded-bug reviewer); `--list` shows them |
 | `codetypera2a --version` | print the version (also `-V`, `version`; `oc --version` too)      |
@@ -159,7 +159,7 @@ Research's [harness2](https://github.com/google-research/harness2) and the
 | Context: give each agent only what it needs | One session per agent and project; tasks carry a message with parts and a `contextId`; `codegraph` and `engram` MCP servers for retrieval instead of reading whole trees |
 | Tools: narrow, well-described interfaces | The hub's `a2a_*` MCP tools (`send_message`, `inbox`, `get_task`, `update_task`, ...); `playwright_*` denied unless an agent needs a browser |
 | Guardrails: least privilege and bounded loops | `tools:` / `permission:` blocks per agent template; read-only shells for reviewers; hop cap per context (`oc continue` to allow more); `model-policy.json` lint |
-| Verification: independent checks | Every code change is checked by `code-reviewer` and `test-runner`, and reviewers use a different model family than the author |
+| Verification: independent checks | Every code change is checked by `code-reviewer` and `test-runner`, and the reviewers are separate agents with read-only rules |
 | Parallel probes (harness2) | For uncertain work the orchestrator sends 2-3 read-only probes to different agents and compares their artifacts before choosing |
 | Evidence-backed lessons (harness2) | Lessons are saved to Engram (`a2a/lessons/<project>`) only with evidence, and `brain` reads them when routing |
 | Memory and state | SQLite hub (`hub.db`) for tasks and nudges; Engram for long-term lessons |
@@ -188,7 +188,7 @@ Homebrew installs the Rust toolchain it needs to build, so you do not need `carg
 
 ```sh
 brew install CarGDev/codetypera2a/codetypera2a
-codetypera2a --version        # codetypera2a 2.2.0
+codetypera2a --version        # codetypera2a 2.2.1
 ```
 
 Update later with `brew update && brew upgrade codetypera2a`. To build the latest `master` instead of
@@ -254,6 +254,8 @@ one tool and give the same result as picking only that tool on the screen; `--al
 | For Claude Code it installs               | Where                                                                 |
 | ----------------------------------------- | --------------------------------------------------------------------- |
 | the agents, converted (`agents/`)         | `~/.claude/agents/<name>.md` (model tier, tool list and color translated; `mode`, `steps` and `permission` have no Claude Code equivalent and are dropped) |
+| a lean `CLAUDE.md` (about 3 kB: authorization, blocking choices, A2A coordination and reports, RDD pointer, Engram, safety, language) | `~/.claude/CLAUDE.md`. Written only when missing or still exactly what `init` wrote; a file of yours (or one you edited, or managed by gentle-ai) is kept, and `--force` replaces it after a backup `CLAUDE.md.bak-<UTC timestamp>`; a symlink is never replaced. `uninstall` removes it only when unchanged |
+| the `rdd-review` skill (about 3 kB, loaded on demand when a gentle-ai review is due; also installed for opencode under `~/.config/opencode/skills/rdd-review/`) | `~/.claude/skills/rdd-review/SKILL.md`, with the same keep-and-backup rules as `CLAUDE.md`; opencode keeps a different file and `init --opencode --force` replaces it after a backup. `uninstall` removes only unchanged copies (and the folder when empty); skills of yours are never touched |
 | slash commands, converted (`commands/`)   | `~/.claude/commands/` (`/plan-new`, `/plan-continue`, `/plan-status`; opencode's `agent:` becomes "delegate to that subagent") |
 | MCP servers `a2a`, `codegraph`, `context7`, `engram`, `playwright` | `~/.claude.json` (`mcpServers`, the user scope `claude mcp add --scope user` writes; backup `~/.claude.json.bak-a2a`; existing entries are never overwritten, except that a dead `a2a` binary path is repaired) |
 | a footer status line and four hooks (`SubagentStart`, `SubagentStop`, `UserPromptSubmit`, `SessionStart`) | `~/.claude/settings.json` (`statusLine`, `hooks`; backup `settings.json.bak-a2a`; only added when absent, your own status line and hooks are kept) |
@@ -392,12 +394,13 @@ codetypera2a reinstall --yes      # same, keeps this binary, runs init --yes, th
 Written in Rust, no scripts. It deletes the agent and command files `init` installed in `~/.claude` and the opencode config dir
 (only those template files and their `.bak-a2a` copies; agents and commands you wrote are never touched), the A2A pane, our MCP entries (`a2a` and the companions `init` added), `default_agent`, the Ollama providers, our
 status line, hooks and plugin entries, the shell-rc block, both runtime homes with every database (the legacy
-`~/.codetypera2a` too), the `a2a-status` tmux window, every dispatcher (`codetypera2a dispatcher`, `oc dispatch`)
+`~/.codetypera2a` too), the `a2a-status` tmux window, the dispatcher of each home being cleaned (`codetypera2a dispatcher`,
+`oc dispatch`; only one a pid file of that home claims, and a dispatcher of any other home is reported and never stopped)
 and, for `uninstall`, the binary and the `oc` link (also `cargo uninstall` / `brew uninstall`). The binary is removed only from
 a cargo or Homebrew location (never a build folder or a copy you placed by hand), `oc` only when it is a link to that binary,
 and a runtime home only when it is named `.codetypera2a`, is the legacy `<opencode dir>/a2a`, or holds our files. Your own entries in
 `opencode.jsonc`, `~/.claude.json` and `settings.json` are kept, but those files are rewritten without comments.
-`reinstall` ends with `verified: no dispatcher, no legacy database, the database is empty`, or lists what is not clean.
+`reinstall` ends with `verified: no dispatcher, no legacy database, the database is empty` (for this home), or lists what is not clean.
 
 ### Uninstall
 
@@ -476,12 +479,31 @@ and survives `init --force`.
 **The table** (GitHub Copilot, token prices from the GitHub docs, USD per 1M tokens in/out, 2026-10;
 for models you lack, the screen recommends the next best one you have, GitHub Copilot preferred):
 
-| Role | Agents | Model | $ in / out |
-| --- | --- | --- | --- |
-| Light work: routing, running commands, summaries, lookups | `brain`, `test-runner`, `summarizer`, `doc-lookup`, `git-historian`, `pr-commenter`, `mentor` | `claude-haiku-5.5` (or `gpt-6-luna`) | 0.10 / 0.50 |
-| Everyday coding and agentic work | `orchestrator`, `plan`, `build`, `code-debugger`, `owasp-guardian`, `security-scanner`, `test-case-generator`, `react-frontend-expert`, `typescript-mcp-expert`, `api-design-architect`, `software-architecture-expert`, `playwright-tester` | `claude-sonnet-5.5` (or `gpt-5.6-terra`) | 2 / 10 |
-| Design, long-horizon reasoning | `architect` | `claude-opus-5.5` (or `gpt-6.1-sol`) | 4 / 20 |
-| Reviewing | `code-reviewer`, `pr-reviewer` | `gpt-6.1-sol`, a different family than the Claude that wrote the code | 2 / 10 |
+| Tier | Agents | opencode | Claude Code | $ in / out |
+| --- | --- | --- | --- | --- |
+| Cheap: routing, running commands, summaries, lookups | `brain`, `test-runner`, `summarizer`, `doc-lookup`, `git-historian`, `pr-commenter` | `claude-haiku-5.5` (or `gpt-6-luna`) | `haiku` | 0.10 / 0.50 |
+| Balanced: everyday coding, reviewing, design | every other shipped agent (`orchestrator`, `plan`, `build`, `architect`, `mentor`, `code-debugger`, `code-reviewer`, `pr-reviewer`, `owasp-guardian`, `security-scanner`, the test, frontend and architecture agents, `playwright-tester`) | `claude-sonnet-5.5` (or `gpt-5.6-terra`) | `sonnet` | 2 / 10 |
+| Deep: only agents you opt in | none by default | `claude-opus-5.5` (or `gpt-6.1-sol`), else the most expensive installed model | `opus` | 4 / 20 |
+
+A Claude Code subagent never gets `inherit`: it gets its tier's model, and `sonnet` when nothing else applies.
+
+**Deep is opt-in.** No agent runs on the strongest model unless you ask:
+
+```sh
+codetypera2a models deep list                 # the agents on the deep list (from the file and from the environment)
+codetypera2a models deep add architect plan   # shipped agents only; at most 32
+codetypera2a models deep remove plan
+A2A_DEEP_AGENTS=architect,plan                # the same list from the environment; it adds to the file, never removes
+```
+
+The list is `deep-agents.json` in the runtime home. A change applies at the next `codetypera2a init` (the Claude
+subagent files get `opus`) or `codetypera2a models --recommended` (opencode gets the strongest installed model).
+
+**When a preferred model is not installed.** opencode picks by price among the installed models that have a known
+price: the cheapest for the cheap tier, the lower median for balanced, the most expensive for deep. If no installed
+model has a known price, the agent file gets **no `model:` line** on purpose, so opencode uses its own default.
+`init` and `models --recommended` rewrite the agent files this way (a model you chose and that is installed is kept),
+and print a note for any `opencode.jsonc` override that names a model your opencode does not have.
 
 Agents you add yourself get no recommendation; pick any model or leave opencode's default. The very
 top models (`claude-fable-5.1`, `gpt-6-astra`: 10 / 50) are never recommended; pick them by hand where
@@ -489,9 +511,10 @@ the extra cost is worth it.
 
 **Policy.** `a2a/model-policy.json` (used by `check-models`) allows every model above, in three tiers
 (`cheap`, `sonnet`, `deep`), and anything else is "unknown". The agents listed in `readOnlyAgents`
-(`brain`, `mentor`, `summarizer`, `doc-lookup`, `git-historian`, `test-runner`, `pr-commenter`) must stay on a
+(`brain`, `summarizer`, `doc-lookup`, `git-historian`, `test-runner`, `pr-commenter`) must stay on a
 `cheap` model. A pick the policy does not allow is still saved; the screen warns and `check-models` flags
-it. `init` does not overwrite an existing policy file (add `--force`).
+it. `init` does not overwrite an existing policy file (add `--force`): an older installed policy may still list `mentor`
+as read-only, so `check-models` flags `mentor` (now on the balanced tier) until `init --force` refreshes it.
 
 ## Security notes
 

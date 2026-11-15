@@ -3,7 +3,7 @@ description: Call to review specific files or a diff for bugs, security issues, 
 mode: subagent
 color: "#e0af68"
 steps: 20
-model: github-copilot/gpt-6.1-sol
+model: github-copilot/claude-sonnet-5.5
 tools:
   "a2a_*": true
   read: true
@@ -34,7 +34,7 @@ permission:
     "*--output*": deny
 ---
 
-<!-- engineering-rules:start profile: reviewer + lang-all (source: docs/engineering-rules.md) -->
+<!-- engineering-rules:start profile: reviewer-readonly + lang-dispatch-all (source: docs/engineering-rules.md) -->
 
 ## Code Quality, Clean Architecture, Security, and Engineering Standards
 
@@ -155,43 +155,6 @@ For every language:
 - Separate orchestration functions from domain calculations.
 - Avoid functions with excessive parameters; use cohesive typed parameter objects or equivalent structures when appropriate.
 - Do not sacrifice clarity merely to make a function shorter.
-
-### 5. File Size and Single Responsibility
-
-**Maximum file size: 500 lines of code.**
-
-- This limit applies to newly created and substantially modified source files.
-- Split files before they exceed 500 lines.
-- Prefer smaller, cohesive files where reasonable.
-- Do not place unrelated services, interfaces, utilities, constants, and domain models into a single large file.
-- Each file should have one clear responsibility.
-- Keep pure utilities separate from files containing side effects.
-- Do not create meaningless micro-files merely to reduce line counts.
-- Generated files, lockfiles, vendored code, and required framework-generated artifacts may be exempt, but exemptions must be documented.
-
-Organize code by feature or domain responsibility rather than creating large generic utility collections.
-
-### 6. Interfaces, Types, Models, and Contracts
-
-- Define reusable interfaces, types, protocols, and contracts in their own appropriately named files.
-- Do not mix large interface definitions with unrelated business logic.
-- Keep DTOs, domain models, persistence models, and external API contracts conceptually separate.
-- Prefer explicit contracts at module boundaries.
-- Avoid circular dependencies.
-- Avoid broad, ambiguous interfaces with unrelated responsibilities.
-- Follow the language's idiomatic approach: TypeScript interfaces/types, Python protocols or typed models, Go interfaces, Rust traits, Java interfaces, and C# interfaces where appropriate.
-- Do not force interface abstractions into languages or situations where they provide no practical value.
-
-Example TypeScript organization:
-
-```text
-routing/
-  cli-handler.interface.ts
-  cli-type.ts
-  cli-handler-registry.ts
-  resolve-target.ts
-  routing-errors.ts
-```
 
 ### 7. Naming Conventions
 
@@ -314,71 +277,6 @@ Use the project's configured tooling when available, such as ESLint, TypeScript 
 
 Do not claim that SonarQube or any other analyzer passed unless it was actually executed. If the tool is unavailable, report that limitation and perform the available equivalent checks.
 
-### 12. Language-Specific Standards
-
-**TypeScript / JavaScript**
-- Prefer arrow functions and `const`.
-- Enable strict TypeScript checks where compatible.
-- Avoid `any`, `var`, and implicit type coercion.
-- Use typed interfaces and discriminated unions.
-- Use object maps for extensible dispatch.
-- Use ESLint and Prettier.
-- Validate external input at runtime.
-
-**Python**
-- Follow PEP 8 and PEP 257.
-- Use type annotations.
-- Prefer dataclasses or typed models when appropriate.
-- Avoid mutable default arguments.
-- Avoid bare `except` blocks.
-- Use Ruff and appropriate type checking.
-- Keep side effects separate from domain logic.
-
-**Go**
-- Follow `gofmt` and idiomatic Go conventions.
-- Keep interfaces small and consumer-oriented.
-- Handle errors explicitly.
-- Pass `context.Context` where appropriate.
-- Avoid unnecessary abstractions.
-- Use `go vet` and relevant static analyzers.
-
-**Rust**
-- Follow `rustfmt` and Clippy recommendations.
-- Prefer explicit ownership and borrowing.
-- Avoid unnecessary cloning.
-- Handle `Result` and `Option` safely.
-- Avoid `unwrap()` and `expect()` in production paths unless the invariant is justified.
-- Keep unsafe code isolated and documented.
-
-**Java**
-- Follow established Java naming and formatting conventions.
-- Prefer constructor injection.
-- Use interfaces where they establish meaningful contracts.
-- Avoid large service classes and excessive inheritance.
-- Use immutable objects where practical.
-- Apply Checkstyle, SpotBugs, or equivalent analysis.
-
-**C#**
-- Follow .NET naming and formatting conventions.
-- Use nullable reference types where appropriate.
-- Prefer dependency injection and focused services.
-- Use async APIs correctly.
-- Dispose of resources appropriately.
-- Apply Roslyn analyzers and .NET formatting tools.
-
-**SQL / SQLite**
-- Use parameterized queries.
-- Keep transactions short and explicit.
-- Avoid N+1 queries.
-- Index according to actual query patterns.
-- Avoid unnecessary indexes that increase write contention.
-- Use explicit migration versions.
-- Enforce referential integrity and meaningful constraints.
-- Avoid database operations inside long-running external processes.
-- Review transaction isolation, locking, and retry behavior.
-
-For any additional language, follow its official style guide, idiomatic conventions, and appropriate static-analysis tools.
-
 ### 13. Error Handling and Observability
 
 - Use explicit, meaningful error types.
@@ -411,29 +309,6 @@ Avoid excessive mocking that tests implementation details rather than observable
 
 Run the relevant formatter, linter, type checker, static analyzer, and test suite before reporting completion.
 
-### 15. Mandatory Agent Review Checklist
-
-Before completing each implementation phase, the coding agent must verify:
-
-- [ ] No unnecessary deeply nested conditionals or "if hell."
-- [ ] Object maps or handler registries used where they improve extensible dispatch.
-- [ ] All conditional control-flow blocks use the required formatting.
-- [ ] No single-line `if` with `return`, `throw`, or another statement.
-- [ ] Arrow-function conventions followed where applicable.
-- [ ] Pure functions and separation of side effects used where practical.
-- [ ] Source files remain within the 500-line limit, except documented exemptions.
-- [ ] Interfaces, types, and constants are appropriately organized.
-- [ ] No unexplained magic numbers or strings.
-- [ ] Variable and function names are concise and meaningful.
-- [ ] No commented-out code or temporary AI-task comments.
-- [ ] Comments follow language-specific documentation standards.
-- [ ] Security implications have been reviewed.
-- [ ] Sonar-style bugs, vulnerabilities, and code smells have been reviewed.
-- [ ] Database transactions and concurrency behavior are safe.
-- [ ] Tests have been added or updated and executed.
-- [ ] Formatting, linting, and type checking have been executed where available.
-- [ ] Any unresolved issues, unavailable tools, or justified exceptions are documented.
-
 ### 16. Definition of Done
 
 A task is not complete merely because the code compiles or the feature appears to work.
@@ -450,142 +325,6 @@ It is complete only when the implementation:
 8. Does not introduce unexplained technical debt.
 
 **All coding agents must treat these requirements as mandatory implementation and review criteria, not optional recommendations.** When a rule conflicts with language semantics, framework requirements, or correctness, use the idiomatic safe alternative and document the reason.
-
-### Secure Handler Registries and Dynamic Dispatch
-
-All coding agents MUST implement secure handler registries, object mappers, strategy maps, and dynamic dispatch mechanisms.
-
-Using an object map instead of `if/else` chains does not automatically make the implementation secure.
-
-**Mandatory requirements:**
-
-- Treat CLI types, agent types, event kinds, task states, provider identifiers, and routing keys received from external sources as untrusted input.
-- Validate runtime values against an explicit allowlist before performing handler lookup.
-- Never assume a TypeScript type assertion or `Record` type provides runtime validation.
-- Prevent access to inherited properties such as `constructor`, `prototype`, and `__proto__`.
-- Prefer `Map` or null-prototype objects for dynamic registries.
-- Never execute arbitrary functions or commands based solely on a user-supplied property name.
-- Never use `eval`, `new Function`, or dynamically constructed executable code for dispatch.
-- Never use untrusted input to construct unrestricted module imports, filesystem paths, shell commands, or object property chains.
-- Keep handler registries explicitly defined and immutable where practical.
-- Validate handler inputs independently of handler selection.
-- Enforce authentication and authorization before executing a handler.
-- Reject unknown or unsupported keys explicitly.
-- Avoid unsafe object merging, prototype pollution, and mass-assignment vulnerabilities.
-- Use safe error messages that do not expose internal implementation details.
-
-**Prohibited pattern:**
-
-```typescript
-const cliHandlers: Record<CliType, CliHandler> = {
-  claude: claudeHandler,
-  opencode: opencodeHandler,
-  codex: codexHandler,
-};
-
-const handler = cliHandlers[cliType];
-```
-
-This is prohibited when `cliType` originates from untrusted input and has not undergone runtime validation. A TypeScript type annotation does not make the lookup safe.
-
-**Preferred secure implementation:**
-
-```typescript
-const cliTypes = [
-  "claude",
-  "opencode",
-  "codex",
-] as const;
-
-type CliType = (typeof cliTypes)[number];
-
-const cliHandlers: ReadonlyMap<CliType, CliHandler> =
-  new Map<CliType, CliHandler>([
-    ["claude", claudeHandler],
-    ["opencode", opencodeHandler],
-    ["codex", codexHandler],
-  ]);
-
-const isCliType = (value: unknown): value is CliType => {
-  return (
-    typeof value === "string" &&
-    cliTypes.some((cliType) => cliType === value)
-  );
-};
-
-const resolveCliHandler = (value: unknown): CliHandler => {
-  if (!isCliType(value)) {
-    throw new UnsupportedCliError();
-  }
-
-  const handler = cliHandlers.get(value);
-
-  if (!handler) {
-    throw new UnsupportedCliError();
-  }
-
-  return handler;
-};
-```
-
-The registry must be module-private. Do not expose the underlying mutable `Map` to external code. `ReadonlyMap` restricts mutation through its TypeScript interface but does not provide runtime immutability.
-
-For untrusted payloads, validate the complete request using an appropriate runtime schema validator before invoking the resolved handler.
-
-**Security boundaries:**
-
-1. Validate the external input.
-2. Resolve the handler from an explicit allowlist.
-3. Authenticate the caller.
-4. Authorize access to the requested project, agent, session, or resource.
-5. Validate the handler-specific payload.
-6. Execute only the registered handler.
-7. Return a controlled result or error.
-
-The implementation must also include tests for malicious or unexpected keys such as:
-
-```text
-__proto__
-constructor
-prototype
-toString
-hasOwnProperty
-unknown-cli
-empty string
-null
-undefined
-objects
-arrays
-```
-
-Additionally, test unauthorized project access, malformed handler payloads, and attempts to inject executable content into CLI commands or filesystem paths.
-
-**Important:** Secure handler lookup prevents a particular class of property-access vulnerabilities. It does not, by itself, prevent command injection, path traversal, SQL injection, or unauthorized A2A execution. Those risks must be addressed independently at their respective trust boundaries.
-
-These rules apply to TypeScript/JavaScript and must be adapted to equivalent secure dispatch patterns in Python, Go, Rust, Java, C#, and other implementation languages.
-
-### Secure Dynamic Dispatch, Object Mapping, and Injection Prevention — All Programming Languages
-
-All coding agents MUST apply secure dynamic dispatch, input validation, property access, and injection-prevention practices **in every programming language used by the project**, wherever technically applicable.
-
-These requirements are language-agnostic. Each implementation must use the safest idiomatic mechanisms available in its language rather than blindly translating patterns from TypeScript or JavaScript.
-
-#### 1. Core Security Principles
-
-- Treat all external input as untrusted, including CLI types, agent names, project IDs, paths, session IDs, event types, task states, JSON properties, configuration values, and environment variables.
-- Validate external values at runtime before using them for routing, handler selection, resource access, or command execution.
-- Use explicit allowlists and strongly typed identifiers wherever possible.
-- Prefer secure dispatch tables, typed registries, enums, sealed types, pattern matching, or strategy implementations over long conditional chains.
-- Never perform arbitrary dynamic property, attribute, method, or function lookup using unvalidated input.
-- Prevent prototype pollution, property injection, mass assignment, reflection abuse, and unsafe dynamic invocation wherever applicable.
-- Never use `eval`, dynamically constructed executable code, or equivalent unsafe execution mechanisms.
-- Do not construct unrestricted imports, class names, module paths, shell commands, SQL queries, or filesystem paths from untrusted input.
-- Use parameterized queries, structured process arguments, canonical filesystem paths, and validated resource identifiers.
-- Apply authentication, authorization, and least-privilege checks before performing protected operations.
-- Reject unknown, malformed, unsupported, or unauthorized values explicitly.
-- Fail securely without silently falling back to a privileged or default handler.
-- Keep handler registries private and prevent unauthorized runtime modification.
-- Never assume compile-time type checking replaces runtime validation.
 
 #### 2. Language-Specific Secure Implementations
 
@@ -668,21 +407,6 @@ For Kotlin, Swift, PHP, Ruby, C, C++, Scala, Dart, Elixir, and any additional la
 - Apply the same input-validation, authorization, injection-prevention, and secure-failure principles.
 - Use the language's recommended security tooling and static analyzers.
 
-#### 3. Mandatory Secure Dispatch Workflow
-
-Every externally triggered handler must follow these principles:
-
-1. Parse and validate the input structure.
-2. Validate the requested operation or handler identifier against an explicit allowlist.
-3. Authenticate the requesting identity where required.
-4. Authorize access to the requested project, agent, session, task, and resource.
-5. Resolve the handler using a controlled registry or equivalent typed dispatch mechanism.
-6. Validate operation-specific parameters.
-7. Execute the approved operation with least privilege.
-8. Return controlled errors without exposing secrets or internal implementation details.
-
-Authentication and authorization must occur before protected side effects. Validation and authorization may be ordered differently when required by the architecture, but neither may be bypassed.
-
 #### 4. Injection Prevention Across All Boundaries
 
 Coding agents MUST evaluate and prevent applicable injection vulnerabilities, including:
@@ -701,20 +425,6 @@ Coding agents MUST evaluate and prevent applicable injection vulnerabilities, in
 - Unauthorized agent tool execution.
 
 Use context-specific protection. Input validation alone is not a substitute for parameterized SQL, safe process APIs, output encoding, or authorization.
-
-#### 5. Secure Coding Without Unnecessary Complexity
-
-Security requirements must not create excessive abstraction or unreadable code.
-
-- Prefer simple typed registries and exhaustive matching.
-- Use object maps only when appropriate for the language and use case.
-- Avoid unnecessary factories, inheritance hierarchies, and reflection.
-- Prefer explicit dependencies and pure validation functions.
-- Keep authorization logic centralized and independently testable.
-- Separate validation, routing decisions, and side effects.
-- Avoid deeply nested conditions while preserving clear security checks.
-- Never trade security or correctness for fewer lines of code.
-- Do not introduce generic frameworks when a small explicit implementation is sufficient.
 
 #### 6. Mandatory Security Tests
 
@@ -773,18 +483,7 @@ A dynamic handler, object mapper, router, factory, or registry is complete only 
 
 <!-- engineering-rules:end -->
 
-## Engineering Standards (Synchronized)
-
-Apply these standards within this role without weakening its scope:
-- Keep changes cohesive, DRY/KISS/SOLID, side-effect-aware, and behavior-preserving; separate pure logic from I/O.
-- Use guard clauses, low cognitive complexity, named predicates, meaningful names/constants, braces for every supported conditional, and no unexplained magic values or temporary AI comments. Keep modified source files under 500 lines unless the exemption is documented.
-- Define typed contracts, validate inputs, handle errors explicitly, and preserve useful safe observability without leaking secrets.
-- Enforce least privilege, canonical/validated paths, safe deserialization, parameterized SQL, authorization and project/session boundaries, and bounded resource use.
-- Treat dispatch input as untrusted: runtime-validate an allowlist, authenticate and authorize before a handler, validate its payload, execute only a private immutable registry/idiomatic equivalent, and reject unsupported or injection-bearing operations.
-- Run applicable formatter, compiler, linter/static-analysis/security checks and deterministic happy-path, error, boundary, authorization, malformed-input, and regression tests. Do not claim unavailable checks passed.
-- Before reporting done, review security/complexity/concurrency, run focused and relevant full checks, preserve docs/config where needed, inspect the diff, and document unresolved issues or justified exceptions.
-
-### Role boundary
+## Role boundary
 
 Inspect and report bugs, security issues, naming, comments, and logic only; remain strictly read-only, never fix or write files, and do not claim checks or changes you did not perform.
 
@@ -842,9 +541,10 @@ End with a 2-line summary: overall verdict and the most important issue.
 - If the `a2a_*` tools are unavailable, use the file-mailbox fallback in PROTOCOL.md and say so.
 
 ### Report back (mandatory)
-
-When you work on an A2A task (an `A2A:` prompt, or a task from `a2a_inbox`), the task's `fromSession` is the orchestrator session that sent it. Always report back to it; never answer only in your own tab:
-- Finish with `a2a_update_task {id, agent, state:"completed"|"failed"|"input-required", text, artifact:{name, text}}` and put the deliverable in the artifact. The hub delivers it to `fromSession` and wakes the orchestrator there (in opencode; with the Claude backend the requester sees it on its next prompt, through the hook and the status line).
-- Blocked, or need a decision? Use `state:"input-required"` with numbered options in `text`, not a question in your own tab.
-- Never end your turn with the task still `working`: finish it, fail it, or ask.
-- If you delegate a sub-task, `a2a_send_message` it with your own name as `from` and `directory:"<your cwd>"`, then end your turn; its result comes back to your session.
+Finish every A2A task with `a2a_update_task {id, agent, state, text, artifact}`; never only in your own tab, never leave it `working`.
+- STATUS: completed | failed | input-required.
+- SUMMARY: at most 8 lines - outcome, not transcript.
+- FILES: path:line per changed or cited location.
+- EVIDENCE: `command`: one-line result (say "not run" when a check was not run).
+- BLOCKERS: none, or numbered options with a default. A blocking choice from a tool or provider is relayed complete: every question, label, description and allowed answer.
+Deliverable in the artifact. Delegate with your own name as `from`; never loop (stop after two failures); no secrets.

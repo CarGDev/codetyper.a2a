@@ -172,8 +172,28 @@ pub fn kill_term(pid: u32) {
         .status();
 }
 
-/// TERM a whole process group (`pid` leads it): a headless turn and the tools it started.
+/// Pids that may ever be signalled: never 0 (our own group), 1 (init) or a value `kill` reads as negative.
+pub const MIN_SIGNAL_PID: u32 = 2;
+pub const MAX_SIGNAL_PID: u32 = i32::MAX as u32;
+
+pub fn is_signalable_pid(pid: u32) -> bool {
+    (MIN_SIGNAL_PID..=MAX_SIGNAL_PID).contains(&pid)
+}
+
+/// Whether `pid` is a process group leader, as a process started with `process_group(0)` is.
+pub fn leads_own_group(pid: u32) -> bool {
+    run("ps", &["-o", "pgid=", "-p", &pid.to_string()])
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        == Some(pid)
+}
+
+/// TERM a whole process group (`pid` leads it): a headless turn and the tools it started. Does nothing
+/// unless `pid` is a signalable pid that really leads its own group.
 pub fn kill_group_term(pid: u32) {
+    if !is_signalable_pid(pid) || !leads_own_group(pid) {
+        return;
+    }
     let _ = Command::new("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
         .status();

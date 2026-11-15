@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 /// Agent templates, embedded at build time so install does not depend on the repo path.
 pub(crate) static AGENTS: Dir = include_dir!("$CARGO_MANIFEST_DIR/agents");
 pub(crate) static COMMANDS: Dir = include_dir!("$CARGO_MANIFEST_DIR/commands");
+/// Skills installed next to the agents (`<config>/skills/<name>/SKILL.md`), one folder per skill.
+pub(crate) static SKILLS: Dir = include_dir!("$CARGO_MANIFEST_DIR/templates/skills");
 static PLUGINS: Dir = include_dir!("$CARGO_MANIFEST_DIR/plugins");
 /// The Claude Code pane mod (lives under `plugins/` but belongs to Claude Code, never to opencode).
 pub(crate) static CLAUDE_MOD: Dir = include_dir!("$CARGO_MANIFEST_DIR/plugins/claude-a2a");
@@ -28,15 +30,18 @@ COMMANDS:
                  Claude Code: install the same agents and commands, converted to its format, in
                  ~/.claude and register the same MCP servers in ~/.claude.json
   models         Choose each agent's model from the models opencode has (terminal UI);
-                 --recommended applies the suggested ones, --show prints the table
+                 --recommended applies the suggested ones, --show prints the table; `models deep list|add|remove <agent>...`
+                 opts agents in to the strongest model (opus), none by default (also env A2A_DEEP_AGENTS)
   uninstall      Delete everything codetypera2a put on this machine, for good (no backups): the agent and command files
                  `init` installed in ~/.claude and the opencode config dir (never files you wrote), our MCP/plugin/hook/status-line entries, the shell
-                 block, the runtime homes and databases (also the legacy ones, only when they are ours), our dispatchers and
+                 block, the runtime homes and databases (also the legacy ones, only when they are ours), the dispatcher of this home (it stops only
+                 dispatchers a pid file of these homes claims; others are reported) and
                  the binary when cargo or brew owns it (and an oc link to it). Dry run unless --yes; --keep-binary keeps it
-  reinstall      Same clean-up but keeps this binary, then runs init --yes and verifies: no dispatcher, no legacy
-                 database, empty database. Dry run unless --yes. Update the binary first: cargo install --path . --force
+  reinstall      Same clean-up but keeps this binary, then runs init --yes and verifies: no dispatcher of this home, no
+                 legacy database, empty database. Dry run unless --yes. Update the binary first: cargo install --path . --force
   hub            Run the A2A hub (MCP server over stdio; register it in opencode.jsonc)
-  dispatcher     Run the dispatcher daemon that wakes sessions when the hub has work
+  dispatcher     Run the dispatcher daemon that wakes sessions when the hub has work. Its task prompts ask for a
+                 compact report: STATUS, SUMMARY (<=8 lines), FILES, EVIDENCE, BLOCKERS (docs/report-back.md)
   oc [cmd]       Run opencode in this pane with the dispatcher alongside: (none) | dispatch
                  (foreground, same pane) | agent <name> | status | stop | continue <contextId>.
                  Also available by running the binary as `oc` (init links it)
@@ -47,7 +52,9 @@ COMMANDS:
   help           Show this help
 
 INIT OPTIONS:
-  --claude       Set up Claude Code (agents, commands, MCP servers)
+  --claude       Set up Claude Code (agents, commands, MCP servers, a lean CLAUDE.md, the rdd-review skill). An
+                 existing or edited CLAUDE.md or skill is kept; --force replaces it after a timestamped backup
+                 (<file>.bak-<UTC>). opencode gets the same skill under <config>/skills
   --opencode     Set up opencode
   --all          Set up every tool init supports
   --yes          Do not show the screen: set up the tools it finds (opencode when none)
@@ -630,6 +637,10 @@ fn init_opencode(args: &[String]) -> i32 {
         "init: {written} file(s) installed, {skipped} skipped (exist; use --force) -> {}",
         root.display()
     );
+    let explicit_force = args.iter().any(|a| a == "--force");
+    for line in crate::targets::guarded::sync_skills_without_manifest(&root, explicit_force) {
+        println!("init: {line}");
+    }
     if md_only {
         // the files carry the template models again: put back the ones saved in opencode.jsonc
         let kept = crate::models::load_config(&root).map_or(0, |(cfg, _)| {
@@ -664,8 +675,20 @@ fn init_opencode(args: &[String]) -> i32 {
         }
     }
     if !args.iter().any(|a| a == "--no-models") {
-        if let Some(note) = crate::models::availability_note(&root) {
-            println!("init: note: {note}");
+        match crate::opencode::models() {
+            Ok(available) => crate::models::repaired_files(
+                &root,
+                &available,
+                "init",
+                &crate::models::deep_effective(),
+            )
+            .iter()
+            .for_each(|line| println!("{line}")),
+            Err(_) => {
+                if let Some(note) = crate::models::availability_note(&root) {
+                    println!("init: note: {note}");
+                }
+            }
         }
         // choose each agent's model from what opencode has (a terminal screen; skipped without a terminal)
         if let Err(e) = crate::models::configure(&root, false, false, true) {
@@ -721,6 +744,13 @@ mod tests {
         format!(
             r#"{{"mcp":{{"servers":{{"a2a":{{"type":"local","command":["{cmd}","hub"],"codemode":false,"x":1}}}}}}}}"#
         )
+    }
+
+    #[test]
+    fn the_help_documents_the_deep_opt_in() {
+        for needed in ["models deep", "A2A_DEEP_AGENTS"] {
+            assert!(HELP.contains(needed), "help lacks: {needed}");
+        }
     }
 
     #[test]

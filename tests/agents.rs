@@ -346,6 +346,91 @@ fn rules_match_what_each_agent_can_do() {
     }
 }
 
+fn rule_ids(name: &str, profiles: &Profiles) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for profile in &profiles.of_agent[name] {
+        expand(profiles, &profiles.members[profile], &mut ids);
+    }
+    ids
+}
+
+#[test]
+fn reviewers_carry_no_writer_only_rules() {
+    let (chunks, profiles) = (rule_chunks(), profiles());
+    let writer_only = [
+        "5",
+        "6",
+        "15",
+        "dispatch-registry",
+        "dispatch-all-intro",
+        "dispatch-core",
+        "dispatch-workflow",
+        "dispatch-simplicity",
+    ];
+    for name in ["code-reviewer", "pr-reviewer"] {
+        let ids = rule_ids(name, &profiles);
+        for id in writer_only {
+            assert!(!ids.contains(id), "{name} must not carry rule {id}");
+        }
+        let style_packs: Vec<&String> = chunks
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|id| *id == "12" || id.starts_with("12-"))
+            .collect();
+        assert!(!style_packs.is_empty(), "the style pack ids exist");
+        for id in style_packs {
+            assert!(
+                !ids.contains(id),
+                "{name} must not carry the style pack {id}"
+            );
+        }
+        for id in [
+            "dispatch-injection",
+            "dispatch-tests",
+            "dispatch-static",
+            "dispatch-done",
+        ] {
+            assert!(ids.contains(id), "{name} still reviews {id}");
+        }
+        let text = expected_rules(name, &chunks, &profiles);
+        assert!(
+            text.contains("**Rust**") && text.contains("**Python**"),
+            "{name}"
+        );
+        assert!(text.len() < 22_000, "{name} rules are {} bytes", text.len());
+    }
+}
+
+const BYTE_BUDGETS: [(&str, usize); 3] = [
+    ("code-reviewer", 27_100),
+    ("pr-reviewer", 30_200),
+    ("owasp-guardian", 42_200),
+];
+
+#[test]
+fn reviewer_and_guardian_prompts_stay_within_their_byte_budgets() {
+    for (name, budget) in BYTE_BUDGETS {
+        let size = std::fs::metadata(root().join("agents").join(format!("{name}.md")))
+            .unwrap()
+            .len() as usize;
+        assert!(size <= budget, "{name} is {size} bytes, budget {budget}");
+    }
+}
+
+#[test]
+fn the_unused_reviewer_profile_is_gone() {
+    let profiles = profiles();
+    assert!(!profiles.members.contains_key("reviewer"));
+    assert!(profiles.members.contains_key("reviewer-readonly"));
+    assert!(
+        profiles
+            .of_agent
+            .values()
+            .flatten()
+            .any(|profile| profile == "reviewer-readonly")
+    );
+}
+
 #[test]
 fn the_repository_rules_for_agents_exist_and_are_not_confused_with_the_templates() {
     let agents_md = std::fs::read_to_string(root().join("AGENTS.md")).unwrap();

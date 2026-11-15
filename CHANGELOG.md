@@ -4,6 +4,68 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [2.2.1] - unreleased
+
+### Changed
+
+- **Housekeeping.** `owasp-guardian` prompt trimmed again to stay under its byte budget (budgets now track the real
+  sizes), the deep list is flushed to disk before and after its rename, and the cleanup tests kill the fake
+  dispatchers they start even when a test fails.
+- **Upgrade note.** `init` does not overwrite an installed `model-policy.json` without `--force`. A policy installed
+  before 2.2.1 still lists `mentor` as read-only, so `check-models` flags `mentor` (now on the balanced tier) until
+  `init --force` refreshes it.
+- **No model line when nothing is priced.** If no installed model has a known price and none of a tier's preferred models
+  is installed, the agent file loses its `model:` line on purpose, so opencode uses its own default.
+- **Smaller reviewer and guardian prompts.** `pr-reviewer` and `owasp-guardian` lose repeated never-lists, examples and
+  duplicated sections (about 1 kB and 5 kB); their behavior, tools and rules blocks are unchanged. Byte budgets are
+  enforced by a test (`code-reviewer` 28 kB, `pr-reviewer` 31 kB, `owasp-guardian` 43 kB).
+- **Model tiers for templates.** The `model:` of the `architect`, `mentor`, `code-reviewer` and `pr-reviewer` templates is now
+  `github-copilot/claude-sonnet-5.5` (balanced tier); no agent defaults to the deep tier.
+- **Reviewers carry fewer rules.** `code-reviewer` and `pr-reviewer` no longer include the writer-only rules
+  (file-size and interface rules, the registry and workflow chunks, the per-language style packs); their rules block
+  shrinks from about 33.6 kB to about 20 kB. They keep the security, testing and review rules for every language.
+- **Token discipline for the orchestrator.** A short `## Token discipline` section (and one line in `brain`) tells the
+  orchestrator to dispatch by reference with at most 12 lines of task text, never read a whole plan just to dispatch,
+  judge on the artifact summary, batch reviewers and test runs across independent units, and send one status table
+  per reply. A test pins the section and the orchestrator's 18 kB budget.
+- **One compact report-back contract.** Every agent template that reports back now carries the same short block (the
+  canonical text is `docs/report-back.md`, pinned byte for byte by a test): STATUS, SUMMARY (at most 8 lines), FILES
+  (path:line), EVIDENCE (command: result), BLOCKERS. The orchestrator, brain and build use the same field names, and
+  the dispatcher's task prompt and requester wake state it too, relaying any blocking choice complete.
+- **Coordination and read-only agents no longer carry writer rules.** The synced "Engineering Standards" block (about
+  1.5 kB) is removed from all 22 agent templates; each keeps its own `## Role boundary`, and writers and reviewers still
+  get their full rules from their profile block. The orchestrator's native-helpers section shrinks to three lines
+  (A2A first). A test pins both.
+
+### Added
+
+- **The `rdd-review` skill.** The receipt-driven review lifecycle now lives in a skill (about 3 kB) that loads only when a
+  review is due, instead of in the always-loaded `CLAUDE.md`. `init --claude` installs it to `<claude dir>/skills/` and
+  `init --opencode` to `<opencode config>/skills/` (opencode v2 reads `skills/<name>/SKILL.md`), with the same rules as
+  `CLAUDE.md`: an existing or edited copy is kept, `--force` replaces it after a timestamped backup, a symlink is
+  never replaced, and `uninstall` removes only unchanged copies and the folder when it is empty.
+- **A lean `CLAUDE.md` for Claude Code.** `init --claude` installs a thin, role-neutral `CLAUDE.md` (about 3 kB) into the
+  Claude config dir. It is written only when the file is missing or still exactly what `init` wrote; your own, edited or
+  gentle-ai-managed file is kept, `--force` replaces it after a timestamped backup (`CLAUDE.md.bak-<UTC>`), and a
+  symlink is never replaced. `uninstall` removes it only when unchanged; backups are never touched.
+- **A note for a stale model override.** `init` and `models --recommended` print which `opencode.jsonc` overrides name a
+  model your opencode does not have.
+- **Deep models are opt-in.** `codetypera2a models deep list | add <agent>... | remove <agent>...` (and the
+  `A2A_DEEP_AGENTS` environment variable, comma separated) put shipped agents on the strongest model: `opus` for the
+  Claude subagent files at the next `init`, the most expensive installed model for opencode at the next
+  `models --recommended`. No agent is deep by default.
+
+### Fixed
+
+- **Starting or replacing a dispatcher no longer kills dispatchers by name.** Only this home's registered and pidfile
+  dispatchers are stopped; `reinstall`'s check also covers the legacy home, and pid claims are bounded to a valid pid.
+  An older dispatcher of this home from a pre-registry build is no longer swept: stop it by hand (find the pid with
+  `ps`, then `kill <pid>`). `oc stop` handles only registered dispatchers and the pid-file owner. An interrupt of a
+  Claude turn only signals a run whose pid file names a live process that leads its own group.
+- **`uninstall` and `reinstall` only touch the dispatchers of the home being cleaned.** They stop and count only
+  dispatchers a pid file of that home claims (checked again right before each signal); other dispatchers are reported,
+  never stopped, and no longer make `reinstall` fail. The cleanup tests run with a clean environment.
+
 ## [2.2.0] - 2026-11-08
 
 ### Added
@@ -172,7 +234,8 @@ The major version is for one breaking change: `codetypera2a init` is no longer o
   overwritten, except that a dead `a2a` binary path is repaired. The same source files feed both tools, so there
   is nothing extra to maintain. `$CLAUDE_CONFIG_DIR` and `--claude-dir <path>` choose another config dir (its MCP
   file is then `<dir>/.claude.json`). The converter maps the model to a tier (`sonnet`, `haiku`, `opus`; `gpt-*`
-  becomes `inherit`), `tools:` to Claude Code tool names (`a2a_*` becomes `mcp__a2a`) and the colour to a name
+  becomes `inherit`; correction: since 2.2.1 Claude subagents never get `inherit`, an unknown model becomes `sonnet`),
+  `tools:` to Claude Code tool names (`a2a_*` becomes `mcp__a2a`) and the colour to a name
   Claude Code accepts, and drops `mode` and `steps`.
 - **Target picker.** On a terminal, `init` opens a multi-select screen (detected tools are checked, tools it cannot
   set up yet are listed as "coming soon": Codex CLI, Cursor, Gemini CLI, Kiro, VS Code Copilot Chat). New flags
@@ -266,7 +329,7 @@ The major version is for one breaking change: `codetypera2a init` is no longer o
 
 ### Fixed
 
-- Old dispatchers survived upgrades and ran next to the new one: against the new schema they failed (`NOT NULL constraint failed: nudges.updated_at`) and each opened its own session, so every task spawned several orchestrator/agent tabs. Dispatchers now register their version; `oc`/`oc ensure` replace an older one (never a newer one), and `oc stop` ends every dispatcher of the database. Dispatchers from before this version cannot be fixed: run `pkill -f "codetypera2a dispatcher"` once.
+- Old dispatchers survived upgrades and ran next to the new one: against the new schema they failed (`NOT NULL constraint failed: nudges.updated_at`) and each opened its own session, so every task spawned several orchestrator/agent tabs. Dispatchers now register their version; `oc`/`oc ensure` replace an older one (never a newer one), and `oc stop` ends every dispatcher of the database. Dispatchers from before this version cannot be fixed: find the pid with `ps` and `kill` that exact pid (never stop dispatchers by a name pattern: it would also stop dispatchers of other homes).
 - Delivery to a session whose folder no longer exists (a moved project) returned `HTTP 404` and was retried forever. Such sessions are retired and replaced, a task for a missing folder fails with `directory_missing`, and a failing delivery is retried 5 times with growing waits, then reported on the task as `delivery_failed` instead of looping.
 - The dispatcher never opens an `orchestrator` session: there is one orchestrator per project, the user's own, and results return to it. The hub refuses a task sent to oneself or to `orchestrator`.
 

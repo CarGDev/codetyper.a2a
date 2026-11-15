@@ -1307,7 +1307,8 @@ fn nudge_text(kind: &str, t: &TaskRow, style: &backend::Style) -> String {
             .map(|d| format!(", directory:\"{d}\""))
             .unwrap_or_default();
         return format!(
-            "A2A: you are agent \"{to}\". Task {id} is waiting for you{proj}. Call {p}inbox {{agent:\"{to}\"{dir}}}, claim the task with {p}update_task state \"working\", do the work, then finish with {p}update_task state completed | input-required | failed and put the deliverable in an artifact. Your requester is \"{from}\": report ONLY with {p}update_task on this task, never by creating a new task. The only orchestrator is \"orchestrator\" (never \"gentle-orchestrator\"); do not send it work.{note}",
+            "A2A: you are agent \"{to}\". Task {id} is waiting for you{proj}. Call {p}inbox {{agent:\"{to}\"{dir}}}, claim the task with {p}update_task state \"working\", do the work, then finish with {p}update_task state completed | input-required | failed and put the deliverable in an artifact. Your requester is \"{from}\": report ONLY with {p}update_task on this task, never by creating a new task. The only orchestrator is \"orchestrator\" (never \"gentle-orchestrator\"); do not send it work.{tail}{note}",
+            tail = super::report::assignee_tail(),
             from = t.from_agent,
             to = t.to_agent,
             id = t.id,
@@ -1315,7 +1316,8 @@ fn nudge_text(kind: &str, t: &TaskRow, style: &backend::Style) -> String {
         );
     }
     format!(
-        "A2A: task {id} that you sent to \"{to}\" is now {state}. Call {p}get_task {{id:\"{id}\"}}, judge the result, then continue your plan, answer the question with {p}send_message {{taskId}}, or ask the user if it needs their decision.",
+        "A2A: task {id} that you sent to \"{to}\" is now {state}. Call {p}get_task {{id:\"{id}\"}}, judge the result, then continue your plan, answer the question with {p}send_message {{taskId}}, or ask the user if it needs their decision.{tail}",
+        tail = super::report::requester_tail(),
         id = t.id,
         to = t.to_agent,
         state = t.state
@@ -1410,16 +1412,6 @@ fn terminate(pid: u32, wait_ms: u64) -> bool {
     true
 }
 
-/// Dispatchers from before the registry existed are not registered, so they can only be found by
-/// name. Only done for the default database: a sandbox (A2A_DB set) must never touch other processes.
-pub fn sweep_unregistered() {
-    if std::env::var_os("A2A_DB").is_none() {
-        let _ = std::process::Command::new("pkill")
-            .args(["-f", "codetypera2a dispatcher"])
-            .status();
-    }
-}
-
 fn terminate_all(pids: impl Iterator<Item = u32>) {
     pids.for_each(|p| {
         terminate(p, 3000);
@@ -1487,8 +1479,9 @@ pub fn ensure_running() -> Result<Option<u32>, String> {
     ));
     terminate(pid, 3000);
     let _ = std::fs::remove_file(&pid_file);
-    // an unregistered one is an old build: its siblings are old too
-    ver.is_empty().then(sweep_unregistered);
+    if ver.is_empty() {
+        log("an older dispatcher of this home from before the registry is not swept; find it with `ps` and `kill` its pid");
+    }
     start_dispatcher()
 }
 
@@ -1686,7 +1679,10 @@ mod needed_tests {
         };
         add("c1", Some("claude"), "working");
         add("c2", None, "completed");
-        assert_eq!(needed_backends(&conn), BTreeSet::from(["claude".to_string()]));
+        assert_eq!(
+            needed_backends(&conn),
+            BTreeSet::from(["claude".to_string()])
+        );
         add("c3", None, "submitted");
         assert_eq!(needed_backends(&conn).len(), 2);
         let _ = std::fs::remove_dir_all(&dir);

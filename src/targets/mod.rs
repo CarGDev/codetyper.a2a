@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub mod claude;
 pub mod convert;
+pub mod guarded;
 pub mod picker;
 pub mod settings;
 

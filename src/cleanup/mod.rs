@@ -4,6 +4,7 @@
 mod apply;
 mod jsonc;
 mod plan;
+mod procs;
 mod templates;
 
 use plan::{Action, Env};
@@ -29,33 +30,22 @@ pub(super) fn is_ours(command: &str) -> bool {
     })
 }
 
-/// `ps -axo pid=,command=` output reduced to our dispatchers, never this process or its parent.
-fn parse_ps(text: &str, skip: &[u32]) -> Vec<(u32, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim_start();
-            let (pid, command) = line.split_once(char::is_whitespace)?;
-            Some((pid.parse::<u32>().ok()?, command.trim().to_string()))
-        })
-        .filter(|(pid, command)| !skip.contains(pid) && is_ours(command))
-        .collect()
-}
-
-fn dispatchers() -> Vec<(u32, String)> {
-    let out = Command::new("ps").args(["-axo", "pid=,command="]).output();
-    let text = out
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    parse_ps(
-        &text,
-        &[std::process::id(), std::os::unix::process::parent_id()],
-    )
-}
-
 fn list(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|rd| rd.flatten().map(|e| e.path()).collect())
         .unwrap_or_default()
+}
+
+/// The dispatchers claimed by `homes` (and the active pidfile), split from the other ones on the machine.
+fn dispatchers_of(homes: &[PathBuf]) -> procs::Scoped {
+    let active = std::env::var_os("A2A_DISPATCHER_PID")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let files = procs::claim_files(homes, active.as_deref(), &list);
+    let (claims, rejected) = procs::read_claims(&files);
+    let mut scoped = procs::scope(&claims, &procs::process_table(), &crate::sys::pid_alive);
+    scoped.stale.extend(procs::unreadable(rejected));
+    scoped
 }
 
 fn detect(keep_binary: bool) -> Result<Env, String> {
@@ -66,14 +56,28 @@ fn detect(keep_binary: bool) -> Result<Env, String> {
     let exe = std::env::current_exe()
         .ok()
         .map(|p| std::fs::canonicalize(&p).unwrap_or(p));
+    let runtime_homes = vec![crate::paths::runtime_home(), crate::paths::legacy_home()];
+    let dispatchers = dispatchers_of(&runtime_homes);
+    let manifest = crate::targets::claude::Manifest::load(&claude.root);
+    let opencode_dir = crate::paths::config_dir();
+    let claude_ours = crate::targets::guarded::guarded_files()
+        .into_iter()
+        .filter(|(rel, _)| crate::targets::guarded::ours_unchanged(&claude.root, rel, &manifest))
+        .map(|(rel, _)| claude.root.join(rel));
+    let opencode_ours = crate::targets::guarded::skill_files()
+        .into_iter()
+        .filter(|(rel, bytes)| crate::targets::guarded::ours_by_bytes(&opencode_dir, rel, bytes))
+        .map(|(rel, _)| opencode_dir.join(rel));
+    let guarded_ours = claude_ours.chain(opencode_ours).collect();
     Ok(Env {
         home,
         claude_root: claude.root,
         claude_json: claude.mcp_file,
-        opencode_dir: crate::paths::config_dir(),
-        runtime_homes: vec![crate::paths::runtime_home(), crate::paths::legacy_home()],
+        opencode_dir,
+        runtime_homes,
         temp_dir: std::env::temp_dir(),
-        processes: dispatchers(),
+        dispatchers,
+        guarded_ours,
         exe,
         keep_binary,
         agent_files: templates::agent_files(),
@@ -85,6 +89,10 @@ fn detect(keep_binary: bool) -> Result<Env, String> {
 fn execute(actions: &[Action], apply: bool) -> usize {
     let mut failed = 0;
     for action in actions {
+        if let Action::Note(text) = action {
+            println!("  note {text}");
+            continue;
+        }
         if !apply {
             println!("  - {}", plan::describe(action));
             continue;
@@ -161,12 +169,27 @@ fn leftover_rows() -> Result<i64, String> {
     Ok(total)
 }
 
-/// Problems that mean the clean-up did not hold: a live dispatcher, a legacy database, rows in the new one.
+/// The homes `verify` looks at.
+fn verify_homes() -> Vec<PathBuf> {
+    vec![crate::paths::runtime_home(), crate::paths::legacy_home()]
+}
+
+/// Problems that mean the clean-up did not hold: a live dispatcher of this home, a legacy database, rows in
+/// the new one. Dispatchers of other homes are reported and never fail the check.
 fn verify() -> Vec<String> {
     let mut problems = Vec::new();
-    let live = dispatchers();
-    if !live.is_empty() {
-        problems.push(format!("{} dispatcher(s) still running", live.len()));
+    let live = dispatchers_of(&verify_homes());
+    if !live.ours.is_empty() {
+        problems.push(format!(
+            "{} dispatcher(s) of this home still running",
+            live.ours.len()
+        ));
+    }
+    if live.foreign > 0 {
+        println!(
+            "note: {} dispatcher(s) of other homes left running (not ours to stop)",
+            live.foreign
+        );
     }
     if crate::paths::legacy_home().join("hub.db").exists() {
         problems.push("a legacy database exists".into());
@@ -218,13 +241,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_our_dispatchers_are_picked_from_the_process_list() {
-        let ps = " 8112 /Users/x/.cargo/bin/oc dispatch\n 67814 /Users/x/.cargo/bin/codetypera2a dispatcher\n 5 vim oc dispatch.md\n 9 /usr/bin/other dispatcher\n 77 /x/codetypera2a dispatcher\n";
-        let found = parse_ps(ps, &[77]);
-        assert_eq!(
-            found.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
-            vec![8112, 67814]
+    fn verify_covers_every_home_that_stop_covers() {
+        let homes = verify_homes();
+        assert!(homes.contains(&crate::paths::runtime_home()));
+        assert!(homes.contains(&crate::paths::legacy_home()));
+    }
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn no_process_name_pattern_kill_remains_in_src() {
+        let needles = [
+            ["pk", "ill"].concat(),
+            ["kill", "all"].concat(),
+            ["[\"-", "f\""].concat(),
+        ];
+        let mut files = Vec::new();
+        rust_sources(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
         );
+        assert!(
+            files.len() > 20,
+            "the source scan found {} files",
+            files.len()
+        );
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for needle in &needles {
+                assert!(
+                    !text.contains(needle.as_str()),
+                    "{} kills processes by name pattern ({needle})",
+                    file.display()
+                );
+            }
+        }
     }
 
     #[test]

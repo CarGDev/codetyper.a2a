@@ -51,6 +51,7 @@ Then, and only then, do all of this in order:
 ## 5. Safety defaults
 
 - Anything destructive is a dry run unless `--yes` is given.
+- `templates/claude/CLAUDE.user.md` is a product file that `init --claude` installs, not instructions for agents working on this repository.
 - Tests never touch the real home: use a temporary `HOME`, `A2A_DB` and runtime home.
 - Never read, print or store secrets and credentials.
 
