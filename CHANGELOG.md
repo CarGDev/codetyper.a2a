@@ -4,7 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [2.2.1] - unreleased
+## [2.2.2] - unreleased
+
+### Changed
+
+- **Updating agents.** updating agents to save tokens
+
+## [2.2.1] - 2026-11-14
 
 ### Changed
 
